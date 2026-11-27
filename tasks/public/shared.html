@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Shared list · Tasks</title>
+<link rel="icon" href="/icon.svg">
+<link rel="stylesheet" href="/styles.css">
+<style>
+  body { overflow: auto; }
+  .wrap { max-width: 52rem; margin: 0 auto; padding: 2rem 1.5rem 4rem; }
+  .by { color: var(--faint); font-size: .9rem; margin-bottom: 1.4rem; display: flex; gap: 1rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+  #addBar[hidden] { display: none; }
+</style>
+</head>
+<body>
+<div id="app" style="display:block;height:auto">
+  <div class="wrap">
+    <div class="by"><span>Shared with you via Tasks</span><span><button id="printBtn" class="link-btn">🖨 Print</button></span></div>
+    <h1 id="listTitle">Loading…</h1>
+    <div id="listMeta" class="meta" style="margin-bottom:1.4rem"></div>
+    <form id="addBar" autocomplete="off" hidden>
+      <input id="addInput" placeholder="Add to this list…" maxlength="300">
+      <button type="submit" class="primary">Add</button>
+    </form>
+    <ul id="tasks"></ul>
+    <div id="empty" class="empty" hidden>Nothing here yet.</div>
+  </div>
+</div>
+<div id="modalRoot"></div>
+<div id="toasts"></div>
+<script src="/dates.js"></script>
+<script src="/nav.js"></script>
+<script>
+(() => {
+  const $ = s => document.querySelector(s);
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const token = location.pathname.split('/').pop();
+  let L = null;
+  async function load() {
+    const r = await fetch('/api/shared/' + token);
+    if (!r.ok) { $('#listTitle').textContent = 'This list is no longer shared'; $('#tasks').innerHTML = ''; $('#addBar').hidden = true; return; }
+    L = await r.json(); render();
+  }
+  function render() {
+    const edit = L.share && L.share.mode === 'edit';
+    document.documentElement.style.setProperty('--accent', L.color);
+    document.title = L.name + ' · Tasks';
+    $('#listTitle').textContent = L.name;
+    const open = L.tasks.filter(t => !t.done).sort((a, b) => (a.due ? 0 : 1) - (b.due ? 0 : 1) || (a.due || 0) - (b.due || 0));
+    const done = L.tasks.filter(t => t.done);
+    $('#listMeta').textContent = `${open.length} to do · ${done.length} done · ${edit ? 'you can add and check off items' : 'view only'}`;
+    $('#addBar').hidden = !edit;
+    $('#tasks').innerHTML = [...open, ...done].map(t => {
+      const st = t.done ? '' : TaskDates.status(t.due);
+      return `<li class="task ${t.done ? 'done' : ''} ${st}">
+        <button class="check" data-id="${t.id}" ${edit ? '' : 'disabled'}><svg viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></button>
+        <div class="task-main" style="border-radius:var(--radius)"><span class="txt">${esc(t.text)}</span>${t.notes ? `<span class="notes">${esc(t.notes)}</span>` : ''}${t.due ? `<span class="due">${esc(TaskDates.fmt(t.due))}</span>` : ''}</div></li>`;
+    }).join('');
+    $('#empty').hidden = L.tasks.length > 0;
+    $('#tasks').querySelectorAll('.check').forEach(b => b.onclick = async () => {
+      const t = L.tasks.find(x => x.id === b.dataset.id);
+      await fetch(`/api/shared/${token}/tasks/${t.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ done: !t.done }) });
+      load();
+    });
+  }
+  $('#addBar').onsubmit = async e => {
+    e.preventDefault();
+    const p = TaskDates.parse($('#addInput').value); if (!p.text) return;
+    await fetch(`/api/shared/${token}/tasks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(p) });
+    $('#addInput').value = ''; load();
+  };
+  $('#printBtn').onclick = () => window.open('/print/' + token + '?auto', '_blank');
+  const es = new EventSource('/api/events');
+  es.addEventListener('change', e => { const d = JSON.parse(e.data); if (!L || d.listId === L.id || d.listId === null) load(); });
+  load();
+})();
+</script>
+</body>
+</html>
