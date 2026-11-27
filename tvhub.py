@@ -9,7 +9,7 @@ Config: ~/.config/tvhub/config.json   (edit freely, or use the + tile)
 Run `python3 tvhub.py --install` to add it to your Mint menu.
 Windows 10/11: run Setup-TVHub.bat first (installs GTK, VLC, etc.), then start TV Hub from its shortcut.
 """
-import ast, copy, glob, hmac, json, os, random, re, secrets, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time, types, zipfile
+import ast, copy, glob, hmac, io, json, os, random, re, secrets, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time, types, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, urljoin
 import urllib.request, urllib.error
@@ -21,7 +21,7 @@ try:
 except ImportError:
     fcntl = None
 
-VERSION = "0.25.1"
+VERSION = "0.26.1"
 CHANGELOG = [  # (version, what changed). Add a line here and bump VERSION for each release.
     ("0.1.0", "Launcher for Linux Mint: app cards (Jellyfin, Plex, Emby, Netflix, Hulu, Peacock...), kiosk browser, TV screen choice"),
     ("0.2.0", "Close-app hotkey (Ctrl+Alt+K, or tvhub.py --kill)"),
@@ -59,6 +59,10 @@ CHANGELOG = [  # (version, what changed). Add a line here and bump VERSION for e
                "phone remote or mouse; Node.js apps can keep running in the background; Pop-ups section in Settings"),
     ("0.25.1", "Setup-TVHub scripts included and updated (Tasks card added for you, firewall rule for Tasks); "
                "tvhub.py --add-node-app NAME FOLDER [URL] adds a Node.js card with pop-ups and keep-running turned on"),
+    ("0.26.0", "Updates: anTV can check a GitHub repository (its latest release, or a branch) and install new versions "
+               "by itself, or install one from a file you pick (tvhub.py or the all-files zip); the old version is kept "
+               "so you can go back, and a version that fails to start is rolled back; Updates section in Settings"),
+    ("0.26.1", "Updates look at github.com/tdsas27/tvhub-anTV unless you change the repository (or clear it to stop checking)"),
 ]
 IS_WIN = sys.platform == "win32"
 CFG_DIR = (os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "tvhub") if IS_WIN
@@ -948,6 +952,323 @@ def wipe_data():
         os.remove(CFG)
     except OSError:
         pass
+
+
+# ---- updates: from a GitHub repository (latest release, or a branch) or from a file you pick ----
+UPDATE_DIR = os.path.join(CFG_DIR, "updates")        # backups of replaced versions, state.json, pending.json
+UPDATE_MARK = os.path.join(UPDATE_DIR, "pending.json")  # exists from an install until the new version has run fine
+UPDATE_STATE = os.path.join(UPDATE_DIR, "state.json")
+UPDATE_REPO_DEFAULT = "tdsas27/tvhub-anTV"           # used until Settings > Updates sets (or clears) a repository
+UPDATE_MODES = ["off", "ask", "auto"]                # Settings: never / check and tell me / install automatically
+UPDATE_EVERY = 12 * 3600                             # seconds between automatic checks
+UPDATE_KEEP = 5                                      # old versions kept for "go back"
+UPDATE_MAX = 100 * 1024 * 1024
+UPDATE_TOP = ("Setup-TVHub.ps1", "Setup-TVHub.bat")  # besides tvhub.py, *.md next to it, and these folders:
+UPDATE_DIRS = ("tasks", "backgrounds")
+SELF_PATH = os.path.abspath(__file__)
+RESTART = {"want": False}
+
+
+class UpdateError(ValueError):
+    pass
+
+
+def ver_tuple(v):
+    """'0.26.1' / 'v0.26.1-beta' -> (0, 26, 1, 0). Empty tuple if there are no digits."""
+    nums = [int(x) for x in re.findall(r"\d+", str(v or "").split("-")[0])[:4]]
+    return tuple(nums + [0] * (4 - len(nums))) if nums else ()
+
+
+def update_repo(cfg):
+    """The repository to update from: the saved one (empty = none), else the built-in default."""
+    return cfg.get("update_repo", UPDATE_REPO_DEFAULT)
+
+
+def parse_repo(text):
+    """'owner/repo', 'owner/repo@branch' or a github.com URL (also .../tree/branch) -> (owner, repo, branch or None)."""
+    t = re.sub(r"^https?://(www\.)?github\.com/", "", (text or "").strip()).strip("/")
+    m = re.match(r"^([\w.-]+)/([\w.-]+)/tree/(.+)$", t)
+    if m:
+        owner, repo, branch = m.groups()
+    else:
+        branch = None
+        if "@" in t:
+            t, branch = t.split("@", 1)
+        m = re.match(r"^([\w.-]+)/([\w.-]+)$", t)
+        if not m:
+            return None
+        owner, repo = m.groups()
+    repo = re.sub(r"\.git$", "", repo)
+    return (owner, repo, (branch or "").strip() or None) if owner and repo else None
+
+
+def http_get(url, limit=UPDATE_MAX, first=None):
+    """Download a URL (https). first=N reads only the first N bytes. Raises UpdateError with a plain message."""
+    req = urllib.request.Request(url, headers={"User-Agent": "anTV-updater", "Accept": "application/vnd.github+json, */*"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = r.read(first) if first else r.read(limit + 1)
+    except urllib.error.HTTPError as e:
+        raise UpdateError({403: "GitHub is limiting requests right now (or the repository is private). Try again later.",
+                           404: "Not found on GitHub. Check the repository name (private repositories can't be used)."}
+                          .get(e.code, "GitHub answered HTTP %d." % e.code)) from None
+    except (urllib.error.URLError, OSError) as e:
+        raise UpdateError("Couldn't reach GitHub. Is this PC online? (%s)" % getattr(e, "reason", e)) from None
+    if not first and len(data) > limit:
+        raise UpdateError("The download is too big to be an anTV update.")
+    return data
+
+
+def source_version(data):
+    m = re.search(rb'^VERSION\s*=\s*"([^"]+)"', data, re.M)
+    return m.group(1).decode() if m else None
+
+
+def check_source(data):
+    """Is this a whole, readable anTV tvhub.py? Returns its version or raises UpdateError."""
+    try:
+        text = data.decode("utf-8")
+        ast.parse(text)
+    except (UnicodeDecodeError, SyntaxError, ValueError):
+        raise UpdateError("That isn't a working tvhub.py (it can't be read as Python).") from None
+    v = source_version(data)
+    if not v or "class Hub" not in text:
+        raise UpdateError("That file isn't anTV's tvhub.py (no version number or main screen inside).")
+    return v
+
+
+def github_check(repo_text):
+    """Ask GitHub what the newest version is. Returns {version (may be None), url, notes, source}."""
+    p = parse_repo(repo_text)
+    if not p:
+        raise UpdateError("Write the GitHub repository as owner/name, for example myname/antv "
+                          "(add @branch to follow a branch instead of releases).")
+    owner, repo, branch = p
+    base = "https://api.github.com/repos/%s/%s" % (owner, repo)
+    if not branch:
+        try:
+            rel = json.loads(http_get(base + "/releases/latest", limit=4_000_000).decode("utf-8"))
+        except UpdateError as e:
+            if "Not found" not in str(e):
+                raise
+            rel = None  # no releases yet: follow the default branch instead
+        if rel:
+            tag = str(rel.get("tag_name") or "")
+            assets = [a for a in rel.get("assets") or [] if a.get("browser_download_url")]
+            pick = (next((a for a in assets if a["name"].lower().endswith(".zip") and re.search(r"tvhub|antv", a["name"], re.I)), None)
+                    or next((a for a in assets if a["name"].lower() == "tvhub.py"), None))
+            url = pick["browser_download_url"] if pick else rel.get("zipball_url")
+            if not url:
+                raise UpdateError("The latest release has nothing to download.")
+            return {"version": tag.lstrip("vV") if ver_tuple(tag) else None, "url": url,
+                    "notes": str(rel.get("body") or "").strip()[:700], "source": "GitHub release %s" % (tag or "?")}
+        try:
+            branch = json.loads(http_get(base, limit=2_000_000).decode("utf-8")).get("default_branch") or "main"
+        except ValueError:
+            branch = "main"
+    q = urllib.parse.quote(branch, safe="/")
+    head = http_get("https://raw.githubusercontent.com/%s/%s/%s/tvhub.py" % (owner, repo, q), first=12000)
+    v = source_version(head)
+    if not v:
+        raise UpdateError("tvhub.py wasn't found at the top of branch %s of %s/%s." % (branch, owner, repo))
+    return {"version": v, "url": "https://github.com/%s/%s/archive/refs/heads/%s.zip" % (owner, repo, q),
+            "notes": "", "source": "GitHub branch %s" % branch}
+
+
+def read_package(data):
+    """data = bytes of a tvhub.py or of a zip (the all-files zip, or a GitHub zip with one folder around it).
+    Returns {"version", "files": {relative path: bytes}}; only tvhub.py, the setup scripts, *.md, tasks/ and
+    backgrounds/ are taken, with unsafe paths ignored."""
+    if data[:2] != b"PK":
+        return {"version": check_source(data), "files": {"tvhub.py": data}}
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        infos = [i for i in z.infolist() if not i.is_dir()]
+    except zipfile.BadZipFile:
+        raise UpdateError("That file isn't a valid zip.") from None
+    norm = lambda i: i.filename.replace("\\", "/")
+    found = [i for i in infos if norm(i).split("/")[-1] == "tvhub.py" and "__MACOSX" not in norm(i)]
+    if not found:
+        raise UpdateError("There is no tvhub.py inside that zip.")
+    top = min(found, key=lambda i: norm(i).count("/"))
+    prefix, files, total = norm(top)[:-len("tvhub.py")], {}, 0
+    for i in infos:
+        n = norm(i)
+        if not n.startswith(prefix):
+            continue
+        rel = n[len(prefix):]
+        parts = rel.split("/")
+        if not rel or ".." in parts or ":" in parts[0] or parts[-1] in ("", "data.json") or "node_modules" in parts:
+            continue
+        if not (rel == "tvhub.py" or rel in UPDATE_TOP or (len(parts) == 1 and rel.lower().endswith(".md"))
+                or (len(parts) > 1 and parts[0] in UPDATE_DIRS)):
+            continue
+        total += i.file_size
+        if total > UPDATE_MAX or i.file_size > UPDATE_MAX // 3:
+            raise UpdateError("That zip is too big to be an anTV update.")
+        files[rel] = z.read(i)
+    return {"version": check_source(files["tvhub.py"]), "files": files}
+
+
+def console_python():
+    """A python that can print (pythonw.exe on Windows can't), for the start-up test of a new version."""
+    exe = sys.executable
+    if IS_WIN and os.path.basename(exe).lower() == "pythonw.exe":
+        c = os.path.join(os.path.dirname(exe), "python.exe")
+        if os.path.isfile(c):
+            return c
+    return exe
+
+
+def list_backups():
+    return sorted(glob.glob(os.path.join(UPDATE_DIR, "tvhub-*_*.py")), key=lambda p: os.path.basename(p).split("_", 1)[1])
+
+
+def backup_version(path):
+    return os.path.basename(path)[len("tvhub-"):].split("_")[0]
+
+
+def update_state():
+    try:
+        with open(UPDATE_STATE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def update_state_set(**kw):
+    try:
+        os.makedirs(UPDATE_DIR, exist_ok=True)
+        st = update_state(); st.update(kw)
+        with open(UPDATE_STATE, "w", encoding="utf-8") as f:
+            json.dump(st, f)
+    except OSError:
+        pass
+
+
+def install_package(pkg):
+    """Test the new tvhub.py by starting it, keep the running one as a backup, write the files (tvhub.py last),
+    and leave a marker until the new version has run fine. Returns a summary. Nothing changes if the test fails."""
+    files, new_v, root = pkg["files"], pkg["version"], os.path.dirname(SELF_PATH)
+    if not (os.access(root, os.W_OK) and os.access(SELF_PATH, os.W_OK)):
+        raise UpdateError("anTV's own folder (%s) can't be written to, so it can't be updated there." % root)
+    tmp = SELF_PATH + ".new"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(files["tvhub.py"])
+        try:
+            out = subprocess.run([console_python(), tmp, "--version"], capture_output=True, text=True, timeout=60, **NOWIN)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise UpdateError("Couldn't test the new version (%s), so nothing was changed." % e) from None
+        if out.returncode != 0 or ("anTV " + new_v) not in out.stdout:
+            raise UpdateError("The new version didn't start properly, so nothing was changed.\n\n%s"
+                              % ((out.stderr or out.stdout).strip()[-300:] or "(no message)"))
+        os.makedirs(UPDATE_DIR, exist_ok=True)
+        bk = os.path.join(UPDATE_DIR, "tvhub-%s_%s.py" % (VERSION, time.strftime("%Y%m%d-%H%M%S")))
+        shutil.copyfile(SELF_PATH, bk)
+        for old in list_backups()[:-UPDATE_KEEP]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        extra, skipped = 0, []
+        for rel, data in files.items():
+            if rel == "tvhub.py":
+                continue
+            dst = os.path.join(root, *rel.split("/"))
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                with open(dst + ".tmp", "wb") as f:
+                    f.write(data)
+                os.replace(dst + ".tmp", dst)
+                extra += 1
+            except OSError:
+                skipped.append(rel)
+        os.replace(tmp, SELF_PATH)
+        with open(UPDATE_MARK, "w", encoding="utf-8") as f:
+            json.dump({"from": VERSION, "to": new_v, "backup": bk, "boots": 0}, f)
+        return {"from": VERSION, "to": new_v, "extra": extra, "skipped": skipped, "backup": bk}
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def update_confirm():
+    """The new version ran fine: forget the rollback marker."""
+    try:
+        os.remove(UPDATE_MARK)
+    except OSError:
+        pass
+
+
+def rollback_update(path=None):
+    """Put the newest saved older tvhub.py back (or the one given). Returns its version."""
+    bks = list_backups()
+    path = path or (bks[-1] if bks else None)
+    if not path or not os.path.isfile(path):
+        raise UpdateError("There is no earlier version saved yet. One is saved each time anTV updates itself.")
+    with open(path, "rb") as f:
+        data = f.read()
+    v = check_source(data)
+    tmp = SELF_PATH + ".old"
+    try:
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, SELF_PATH)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    try:
+        os.remove(path)  # so going back again goes one version further back
+    except OSError:
+        pass
+    update_confirm()
+    return v
+
+
+def update_boot_guard():
+    """At start-up: a just-installed version that has now started 3 times without running fine is replaced by the
+    saved old one. True if that happened (the caller then restarts)."""
+    try:
+        with open(UPDATE_MARK, encoding="utf-8") as f:
+            m = json.load(f)
+    except Exception:
+        return False
+    m["boots"] = int(m.get("boots", 0)) + 1
+    if m["boots"] >= 3:
+        try:
+            rollback_update(m.get("backup"))
+        except Exception:
+            update_confirm()
+        return True
+    try:
+        with open(UPDATE_MARK, "w", encoding="utf-8") as f:
+            json.dump(m, f)
+    except OSError:
+        pass
+    return False
+
+
+def update_failed_start():
+    """The main window could not even be built right after an update: go back. True if it did."""
+    try:
+        with open(UPDATE_MARK, encoding="utf-8") as f:
+            m = json.load(f)
+        rollback_update(m.get("backup"))
+        return True
+    except Exception:
+        return False
+
+
+def spawn_self():
+    """Start anTV again in 2 seconds (after this process has let go of its ports)."""
+    code = "import sys,time,subprocess;time.sleep(2);subprocess.Popen(sys.argv[1:]%s)" % (
+        ", creationflags=0x08000000" if IS_WIN else ", start_new_session=True")
+    subprocess.Popen([sys.executable, "-c", code, sys.executable, SELF_PATH] + sys.argv[1:], close_fds=True, **NEWGRP)
 
 
 def choose_path(parent, cfg, title, folder=False, pattern=None):
@@ -2291,6 +2612,7 @@ SHORTCUTS = [
     ("H", "Hide anTV to the taskbar (click it there to bring it back)"),
     ("Esc or Q", "Quit anTV"),
     ("I", "Install an APK (Android app) on a connected device"),
+    ("U", "Install the update (or restart to finish it) when the green update button shows next to the clock"),
     ("Ctrl+Alt+K", "Close the running app and come back"),
 ]
 
@@ -2342,7 +2664,8 @@ class TVSettings(Gtk.Window):
             lb.set_selection_mode(Gtk.SelectionMode.BROWSE)
         self.cat_defs = [("Apps & favorites", self.rows_apps), ("Layout", self.rows_layout), ("Look", self.rows_look),
                          ("Screen & browser", self.rows_system), ("Remote & devices", self.rows_devices),
-                         ("Pop-ups", self.rows_popups), ("Your data", self.rows_data), ("About", self.rows_about)]
+                         ("Pop-ups", self.rows_popups), ("Updates", self.rows_updates), ("Your data", self.rows_data),
+                         ("About", self.rows_about)]
         for name, _fn in self.cat_defs:
             rw = Gtk.ListBoxRow(); lab = Gtk.Label(label=name, xalign=0); lab.set_ellipsize(Pango.EllipsizeMode.END)
             rw.add(lab); self.cats.add(rw)
@@ -2853,6 +3176,31 @@ class TVSettings(Gtk.Window):
             srcs.pop(i - 1)
         self.cfg["popup_sources"] = srcs
 
+    def rows_updates(self):
+        c = self.cfg
+        names = ["Never check", "Check and tell me", "Install automatically"]
+
+        def upd(fn):  # the flow returns True when the person chose "Restart anTV now"
+            if self.hidden(fn):
+                GLib.idle_add(self.restart_after_update)
+        return [{"kind": "choice", "label": "Check for updates", "opts": names,
+                 "get": lambda: UPDATE_MODES.index(c.get("update_mode", "ask")) if c.get("update_mode", "ask") in UPDATE_MODES else 1,
+                 "set": lambda i: c.__setitem__("update_mode", UPDATE_MODES[i])},
+                {"kind": "action", "label": "GitHub repository", "value": lambda: update_repo(c) or "not set",
+                 "run": lambda: self.hidden(lambda: self.hub.update_set_repo(self.hub))},
+                {"kind": "action", "label": "Check for updates now", "value": lambda: self.hub.update_status(),
+                 "run": lambda: upd(lambda: self.hub.update_check_flow(self.hub))},
+                {"kind": "action", "label": "Install an update from a file\u2026",
+                 "run": lambda: upd(lambda: self.hub.update_file_flow(self.hub))},
+                {"kind": "action", "label": "Go back to the previous version",
+                 "value": lambda: ("to " + backup_version(list_backups()[-1])) if list_backups() else "none saved yet",
+                 "run": lambda: upd(lambda: self.hub.update_rollback_flow(self.hub))}]
+
+    def restart_after_update(self):
+        self.hub.tvs = None
+        self.destroy()
+        self.hub.restart_app()
+
     def rows_data(self):
         def restore():
             if self.hidden(self.hub.restore_data):
@@ -2999,6 +3347,7 @@ class Hub(Gtk.Window):
         self.android_active = False
         self.path = []          # folders opened on the main screen
         self.add_target = None  # set while a settings screen is open so "add" flows add into its list
+        self.update_avail, self.update_pending, self._upd_busy = None, None, False  # newer version found / installed, restart needed
         self.vm = Gio.VolumeMonitor.get()  # watches for USB drives being plugged in / removed
         for sig in ("mount-added", "mount-removed", "mount-changed"):
             self.vm.connect(sig, lambda *a: GLib.timeout_add(700, self.on_mounts))
@@ -3026,6 +3375,10 @@ class Hub(Gtk.Window):
         self.rbox.set_tooltip_text("Click to hide"); self.rbox.set_no_show_all(True); self.rbox.set_visible(False)
         self.rbox.connect("button-press-event", lambda *_a: self.hide_remote_badge())
         head.pack_start(self.rbox, False, False, 0)
+        self.upd_btn = Gtk.Button(); self.upd_btn.set_name("upd"); self.upd_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.upd_btn.set_valign(Gtk.Align.CENTER); self.upd_btn.set_no_show_all(True); self.upd_btn.set_visible(False)
+        self.upd_btn.connect("clicked", lambda _b: self.update_badge_click())
+        head.pack_start(self.upd_btn, False, False, 0)
         self.status = Gtk.Label(); self.status.set_name("status"); self.status.set_valign(Gtk.Align.CENTER)
         head.pack_start(self.status, False, False, 0)
         def make_flow():
@@ -3080,6 +3433,8 @@ class Hub(Gtk.Window):
         self.popups = PopupCenter(self)
         self.popups.apply()
         threading.Thread(target=self.start_keepalive_servers, daemon=True).start()
+        GLib.timeout_add_seconds(45, lambda: (update_confirm(), False)[1])  # a just-installed version that got this far is fine
+        GLib.timeout_add_seconds(30, self.update_first)
 
     # ---- idle fade ----
     def touch(self):
@@ -3292,6 +3647,202 @@ class Hub(Gtk.Window):
         self.toast("All data deleted. anTV is as new.")
         return True
 
+    # ---- updates (GitHub or a file)
+    def restart_app(self):
+        """Quit and start anTV again (used after an update)."""
+        RESTART["want"] = True
+        self.quit_app()
+
+    def update_status(self):
+        if self.update_pending:
+            return "restart to use %s" % self.update_pending
+        if self.update_avail:
+            return "%s is available" % (self.update_avail.get("version") or "a new version")
+        t = update_state().get("last_check")
+        return time.strftime("checked %b %d, %H:%M", time.localtime(t)) if t else "not checked yet"
+
+    def refresh_update_badge(self):
+        if self.update_pending:
+            self.upd_btn.set_label("\u21bb  Restart to finish updating to %s" % self.update_pending)
+        elif self.update_avail:
+            self.upd_btn.set_label("\u2b06  Update %s available" % (self.update_avail.get("version") or ""))
+        else:
+            self.upd_btn.set_visible(False)
+            return
+        self.upd_btn.set_visible(True)
+
+    def update_badge_click(self):
+        if not self.upd_btn.get_visible():
+            return False
+        if self.update_pending:
+            if choose_dialog(self, self.cfg, "Restart anTV now?", ["Yes, restart now", "Not now"],
+                             "anTV %s is installed. Restarting starts it." % self.update_pending) == 0:
+                self.restart_app()
+        elif self.update_avail and self.update_offer(self, self.update_avail):
+            self.restart_app()
+        return True
+
+    def update_first(self):
+        self.update_tick()
+        GLib.timeout_add_seconds(3600, self.update_tick)
+        return False
+
+    def update_tick(self):
+        """Automatic check (every 12 hours while anTV is open), unless it is off, no repository is set, or an
+        update is already waiting for a restart."""
+        mode = self.cfg.get("update_mode", "ask")
+        repo = update_repo(self.cfg)
+        if (mode == "off" or not parse_repo(repo) or self._upd_busy or self.update_pending
+                or time.time() - update_state().get("last_check", 0) < UPDATE_EVERY):
+            return True
+        self._upd_busy = True
+        threading.Thread(target=self.update_bg, args=(repo, mode), daemon=True).start()
+        return True
+
+    def update_bg(self, repo, mode):
+        try:
+            info = github_check(repo)
+            update_state_set(last_check=time.time())
+            v = info.get("version")
+            if v and ver_tuple(v) <= ver_tuple(VERSION):
+                return
+            if mode == "auto":
+                pkg = read_package(http_get(info["url"]))
+                if ver_tuple(pkg["version"]) > ver_tuple(VERSION):
+                    GLib.idle_add(self.update_installed, install_package(pkg), True)
+            else:
+                GLib.idle_add(self.update_found, info)
+        except Exception:
+            pass  # quiet: it tries again in an hour
+        finally:
+            self._upd_busy = False
+
+    def update_found(self, info):
+        if not (self.update_avail and self.update_avail.get("version") == info.get("version")):
+            self.update_avail = info
+            self.refresh_update_badge()
+            self.toast("anTV %s is available (green button, or Settings > Updates)" % (info.get("version") or ""), 20)
+        return False
+
+    def update_installed(self, r, auto=False):
+        self.update_pending, self.update_avail = r["to"], None
+        self.refresh_update_badge()
+        self.toast(("Updated to %s. " if auto else "Installed %s. ") % r["to"] + "Restart anTV to use it.", 20)
+        return False
+
+    def update_set_repo(self, parent=None):
+        parent = parent or self
+        r = ask_text(parent, self.cfg, "GitHub repository",
+                     "Where anTV's updates live, as owner/name (for example myname/antv).\n"
+                     "Add @branch to follow a branch instead of the latest release.", update_repo(self.cfg))
+        if r is None:
+            return False
+        if not parse_repo(r):
+            self.data_box(parent, "That doesn't look like a GitHub repository.\nUse owner/name, for example myname/antv.",
+                          Gtk.MessageType.ERROR)
+            return False
+        self.cfg["update_repo"] = r.strip()
+        save(self.cfg)
+        return True
+
+    def update_check_flow(self, parent=None, repo=None):
+        """Check now. Returns True if the person chose to restart anTV (after installing)."""
+        parent = parent or self
+        if repo is not None and repo.strip():
+            if not parse_repo(repo):
+                self.data_box(parent, "That doesn't look like a GitHub repository.\nUse owner/name, for example myname/antv.",
+                              Gtk.MessageType.ERROR)
+                return False
+            self.cfg["update_repo"] = repo.strip(); save(self.cfg)
+        elif not parse_repo(update_repo(self.cfg)) and not self.update_set_repo(parent):
+            return False
+        res = run_busy(parent, self.cfg, "Checking GitHub for updates\u2026", lambda: github_check(update_repo(self.cfg)))
+        if "e" in res:
+            self.data_box(parent, "Couldn't check for updates:\n\n%s" % res["e"], Gtk.MessageType.ERROR)
+            return False
+        update_state_set(last_check=time.time())
+        return self.update_offer(parent, res["v"])
+
+    def update_offer(self, parent, info):
+        v = info.get("version")
+        if v and ver_tuple(v) <= ver_tuple(VERSION):
+            self.update_avail = None; self.refresh_update_badge()
+            self.data_box(parent, "You're up to date.\nanTV %s is the newest version (%s)." % (VERSION, info["source"]))
+            return False
+        text = "You have %s.  Source: %s." % (VERSION, info["source"])
+        if info.get("notes"):
+            text += "\n\n" + info["notes"]
+        if choose_dialog(parent, self.cfg, "anTV %s is available" % (v or "update"), ["Download and install it", "Not now"], text) != 0:
+            return False
+        res = run_busy(parent, self.cfg, "Downloading the update\u2026", lambda: read_package(http_get(info["url"])))
+        if "e" in res:
+            self.data_box(parent, "Couldn't download the update:\n\n%s" % res["e"], Gtk.MessageType.ERROR)
+            return False
+        pkg = res["v"]
+        if ver_tuple(pkg["version"]) <= ver_tuple(VERSION):
+            self.data_box(parent, "You're up to date.\nThe download holds anTV %s, and you have %s." % (pkg["version"], VERSION))
+            return False
+        return self.update_apply(parent, pkg)
+
+    def update_apply(self, parent, pkg):
+        res = run_busy(parent, self.cfg, "Testing and installing anTV %s\u2026" % pkg["version"], lambda: install_package(pkg))
+        if "e" in res:
+            self.data_box(parent, "The update was not installed:\n\n%s" % res["e"], Gtk.MessageType.ERROR)
+            return False
+        r = res["v"]
+        self.update_installed(r)
+        text = "anTV %s is installed (it replaced %s, which is kept so you can go back)." % (r["to"], r["from"])
+        if r["extra"]:
+            text += "\n%d other file%s updated." % (r["extra"], "" if r["extra"] == 1 else "s")
+        if r["skipped"]:
+            text += "\nCouldn't write: " + ", ".join(r["skipped"][:4])
+        return choose_dialog(parent, self.cfg, "Updated to %s" % r["to"], ["Restart anTV now", "Later (it starts the next time)"], text) == 0
+
+    def update_file_flow(self, parent=None):
+        """Install from a tvhub.py or an all-files zip you pick. True if the person chose to restart."""
+        parent = parent or self
+        p = choose_path(parent, self.cfg, "Choose an anTV update (tvhub.py or the all-files .zip)")
+        if not p:
+            return False
+        try:
+            if os.path.getsize(p) > UPDATE_MAX:
+                raise UpdateError("That file is too big to be an anTV update.")
+            with open(p, "rb") as f:
+                pkg = read_package(f.read())
+        except (OSError, UpdateError) as e:
+            self.data_box(parent, "Can't use that file:\n\n%s" % e, Gtk.MessageType.ERROR)
+            return False
+        v, extra = pkg["version"], len(pkg["files"]) - 1
+        more = ("\nIt also holds %d other file%s (setup scripts, Tasks app, backgrounds...)." % (extra, "" if extra == 1 else "s")) if extra else ""
+        if ver_tuple(v) <= ver_tuple(VERSION):
+            ok = choose_dialog(parent, self.cfg, "This file is not newer", ["No, keep anTV %s" % VERSION, "Install %s anyway" % v],
+                               "The file holds anTV %s and you have %s.%s" % (v, VERSION, more)) == 1
+        else:
+            ok = choose_dialog(parent, self.cfg, "Install anTV %s?" % v, ["Yes, install it", "Cancel"],
+                               "You have %s. The version you have now is kept so you can go back.%s" % (VERSION, more)) == 0
+        return self.update_apply(parent, pkg) if ok else False
+
+    def update_rollback_flow(self, parent=None):
+        """Go back to the version that was replaced last. True if the person chose to restart."""
+        parent = parent or self
+        bks = list_backups()
+        if not bks:
+            self.data_box(parent, "There is no earlier version saved yet.\nOne is saved each time anTV updates itself.")
+            return False
+        v = backup_version(bks[-1])
+        if choose_dialog(parent, self.cfg, "Go back to anTV %s?" % v, ["No, keep this version", "Yes, go back to %s" % v],
+                         "You have %s. Your apps and settings stay as they are." % VERSION) != 1:
+            return False
+        try:
+            rollback_update()
+        except UpdateError as e:
+            self.data_box(parent, "Couldn't go back:\n\n%s" % e, Gtk.MessageType.ERROR)
+            return False
+        self.update_pending, self.update_avail = v, None
+        self.refresh_update_badge()
+        return choose_dialog(parent, self.cfg, "Back to %s" % v, ["Restart anTV now", "Later"],
+                             "anTV %s is back in place. Restart to use it." % v) == 0
+
     def hide_to_taskbar(self):
         """Minimize anTV to the taskbar; click it there to bring it back."""
         self.iconify()
@@ -3475,6 +4026,8 @@ class Hub(Gtk.Window):
                "#hint{color:#7d8590;font-size:20px;} #sect{color:#9aa4b2;font-size:26px;font-weight:bold;}"
                "#cog{background:transparent;border:none;box-shadow:none;color:#d6deee;font-size:34px;padding:2px 14px;border-radius:26px;}"
                "#cog:hover,#cog:focus{background:#2a6df4;color:white;}#clock{color:#e8eef9;font-size:38px;font-weight:bold;}#status{color:#9ecbff;font-size:26px;font-weight:bold;}#rinfo{color:#9ecbff;font-size:22px;font-weight:bold;}"
+               "#upd{background:#1f6f43;border:none;box-shadow:none;color:white;font-size:26px;font-weight:bold;padding:4px 18px;border-radius:22px;}"
+               "#upd:hover,#upd:focus{background:#2a9d5c;}"
                "flowboxchild{padding:0;border-radius:18px;}"
                "flowboxchild:focus,flowboxchild:selected{outline:5px solid white;background:transparent;}"
                + self.font_css() + self.bg_css())
@@ -3556,6 +4109,8 @@ class Hub(Gtk.Window):
             return True
         if k in ("i", "I") and self.rbox.get_visible():
             return self.hide_remote_badge()
+        if k in ("u", "U") and self.upd_btn.get_visible():
+            return self.update_badge_click()
         act = remote_action(self.cfg, k)
         if act in ("select", "playpause"):
             f = self.focus_child()
@@ -4415,7 +4970,7 @@ class Hub(Gtk.Window):
             return self.tv_settings()
         dlg = Gtk.Dialog(title="anTV settings", transient_for=self, modal=True)
         hook_back(dlg, self.cfg)
-        HIDE_R, QUIT_R, DONE_R = 100, 101, 102
+        HIDE_R, QUIT_R, DONE_R, RESTART_R = 100, 101, 102, 103
         dlg.add_buttons("Quit anTV", QUIT_R, "Hide anTV", HIDE_R, "Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_size(1100, 760)  # 25% wider than before
 
@@ -4717,6 +5272,21 @@ class Hub(Gtk.Window):
         tab("Pop-ups", form([(None, pu_on), ("Where pop-ups appear", pu_pos), ("Keep a pop-up up for (seconds, 0 = until dismissed)", pu_secs),
                              (None, pu_snd), (None, pu_src_lab), (None, pu_add), (None, pu_clr), (None, pu_test),
                              (None, pu_push), (None, pu_lan), (None, pu_info)]))
+        up_mode = Gtk.ComboBoxText()
+        for t in ("Never check", "Check and tell me", "Install automatically (used the next time anTV starts)"):
+            up_mode.append_text(t)
+        up_mode.set_active(UPDATE_MODES.index(self.cfg.get("update_mode", "ask")) if self.cfg.get("update_mode", "ask") in UPDATE_MODES else 1)
+        up_repo = Gtk.Entry(text=update_repo(self.cfg)); up_repo.set_placeholder_text("owner/name   (add @branch to follow a branch)")
+        up_note = Gtk.Label(label="anTV looks at the latest release of this GitHub repository (or a branch) every 12 hours while it is open.\n"
+                                  "The old version is kept, so you can go back. Public repositories only.", xalign=0)
+        up_chk = Gtk.Button(label="Check for updates now\u2026")
+        up_chk.connect("clicked", lambda _b: self.update_check_flow(dlg, up_repo.get_text()) and dlg.response(RESTART_R))
+        up_file = Gtk.Button(label="Install an update from a file\u2026")
+        up_file.connect("clicked", lambda _b: self.update_file_flow(dlg) and dlg.response(RESTART_R))
+        up_back = Gtk.Button(label="Go back to the previous version\u2026")
+        up_back.connect("clicked", lambda _b: self.update_rollback_flow(dlg) and dlg.response(RESTART_R))
+        tab("Updates", form([(None, up_note), ("Check for updates", up_mode), ("GitHub repository", up_repo),
+                             (None, up_chk), (None, up_file), (None, up_back)]))
         data_note = Gtk.Label(label="Backups hold your apps, settings, card pictures and backgrounds (not browser logins).\n"
                                     "Press Save first if you just changed something.", xalign=0)
         bk = Gtk.Button(label="Save a backup of my data and settings\u2026")
@@ -4740,7 +5310,7 @@ class Hub(Gtk.Window):
         if resp == DONE_R:  # data was restored or deleted: the main screen is already refreshed
             dlg.destroy()
             return
-        if resp in (Gtk.ResponseType.OK, HIDE_R):
+        if resp in (Gtk.ResponseType.OK, HIDE_R, RESTART_R):
             self.cfg["apps"] = apps
             self.cfg["background_default"] = def_cb.get_active()
             self.cfg["idle_delay"] = int(sp_delay.get_value())
@@ -4778,9 +5348,13 @@ class Hub(Gtk.Window):
             self.cfg["popup_sources"] = pu_src["list"]
             self.cfg["popup_push"] = pu_push.get_active()
             self.cfg["popup_lan"] = pu_lan.get_active()
+            self.cfg["update_mode"] = UPDATE_MODES[max(0, up_mode.get_active())]
+            self.cfg["update_repo"] = up_repo.get_text().strip()
             save(self.cfg)
             dlg.destroy(); self.path = []; self.apply_bg(); self.rebuild(); self.place(); self.popups.apply()
-            if resp == HIDE_R:
+            if resp == RESTART_R:
+                self.restart_app()
+            elif resp == HIDE_R:
                 GLib.timeout_add(200, self.hide_to_taskbar)
             elif newly:
                 self.tv_settings()
@@ -4928,5 +5502,19 @@ if __name__ == "__main__":
     if "--install" in sys.argv:
         install()
     else:
-        hub = Hub(); Gtk.main()
-        hub.stop_bg_servers()
+        hub = None
+        if update_boot_guard():  # a fresh update kept failing and was just rolled back: start the old version
+            RESTART["want"] = True
+        else:
+            try:
+                hub = Hub()
+            except Exception:
+                if not update_failed_start():  # a just-installed version can't build its window: go back
+                    raise
+                RESTART["want"] = True
+        if hub is not None:
+            Gtk.main()
+            hub.stop_bg_servers()
+            update_confirm()  # this version ran and was closed normally
+        if RESTART["want"]:
+            spawn_self()
