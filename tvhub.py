@@ -8,6 +8,9 @@ Keys:  arrows = move   Enter = open   A = add app   N = add Node app   S = setti
 Config: ~/.config/tvhub/config.json   (edit freely, or use the + tile)
 Run `python3 tvhub.py --install` to add it to your Mint menu.
 Windows 10/11: run Setup-TVHub.bat first (installs GTK, VLC, etc.), then start TV Hub from its shortcut.
+
+anTV is FREE. Never pay for it. It may not be sold, or installed on any device that is sold. No warranty.
+See LICENSE.txt (also in Settings > About > License and notices).
 """
 import ast, copy, glob, hmac, io, json, os, random, re, secrets, select, shlex, shutil, signal, socket, struct, subprocess, sys, threading, time, types, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,11 +20,15 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gtk, Gdk, GLib, Gio, Pango
 try:
+    from gi.repository import GdkPixbuf
+except ImportError:  # pictures then stay as they are (no shrinking, no icon-pack conversion)
+    GdkPixbuf = None
+try:
     import fcntl  # Linux joystick ioctl (not on Windows)
 except ImportError:
     fcntl = None
 
-VERSION = "0.26.1"
+VERSION = "0.28.0"
 CHANGELOG = [  # (version, what changed). Add a line here and bump VERSION for each release.
     ("0.1.0", "Launcher for Linux Mint: app cards (Jellyfin, Plex, Emby, Netflix, Hulu, Peacock...), kiosk browser, TV screen choice"),
     ("0.2.0", "Close-app hotkey (Ctrl+Alt+K, or tvhub.py --kill)"),
@@ -63,6 +70,15 @@ CHANGELOG = [  # (version, what changed). Add a line here and bump VERSION for e
                "by itself, or install one from a file you pick (tvhub.py or the all-files zip); the old version is kept "
                "so you can go back, and a version that fails to start is rolled back; Updates section in Settings"),
     ("0.26.1", "Updates look at github.com/tdsas27/tvhub-anTV unless you change the repository (or clear it to stop checking)"),
+    ("0.27.0", "License and notices (anTV is free: never pay for it, it may not be sold or put on a device that is sold); "
+               "user profiles: each person has their own apps, layout, look, background and website logins, switched from the "
+               "main screen (P key or the name next to the clock), with an optional 'Who's watching?' question at start; "
+               "Settings > Profiles"),
+    ("0.28.0", "NodeStore card (https://nodestore.space) added as a default card; every card can have a picture, including Back, "
+               "Add app, Node.js app, Install APK, Web Browser, Local Media and the USB drives (one picture for all of them); "
+               "icon packs: import a zip or folder of pictures named after your cards and every card changes at once; "
+               "picture quality levels (Original, High, Balanced, Fast) shrink pictures so they load faster; "
+               "color-only cards are always an option (per card, or for all cards); Settings > Pictures & icons"),
 ]
 IS_WIN = sys.platform == "win32"
 CFG_DIR = (os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "tvhub") if IS_WIN
@@ -665,7 +681,59 @@ def win_hotkey_loop():
         if msg.message == 0x0312:  # WM_HOTKEY
             threading.Thread(target=kill_current, daemon=True).start()
 
+LICENSE_TEXT = """anTV (tvhub.py) - License and Notices
+Copyright (c) TDSAS. All rights reserved except as stated below.
+
+1. anTV IS FREE.
+anTV does not cost anything and never will. NEVER PAY FOR IT. Nobody is allowed to charge you for anTV, for a copy of it,
+or for access to it. If someone asks you to pay for anTV, do not pay, and please tell TDSAS.
+
+2. WHAT YOU MAY DO.
+You may download, install, run and copy anTV for your own personal, non-commercial use. You may change it for your own use.
+You may give unchanged copies to other people free of charge, as long as this license goes with them.
+
+3. WHAT YOU MAY NOT DO.
+a) You may not sell anTV, rent it, or charge any fee for it or for access to it (this includes setup fees, subscriptions,
+   and bundling it with anything that is sold).
+b) You may not install, include or pre-load anTV, or any part of it, on any device that is sold, rented or leased - for
+   example a TV box, streaming stick, PC, mini PC or media player - whether or not the price is said to include it. This
+   applies to makers, resellers and refurbishers alike. (You may sell your own personal device after you remove anTV from it.)
+c) You may not remove or hide this license, or claim that anTV is yours.
+If you break these terms, your permission to use anTV ends.
+
+4. NO WARRANTY.
+anTV is provided "AS IS", without any promise that it works, works properly, is safe, is free of mistakes, or suits your
+purpose. TDSAS is not responsible if anTV does not work properly, stops working, loses or changes your settings or data, or
+causes any other problem. You use it at your own risk. Keep backups (Settings > Your data).
+
+5. INTERNET SERVICES AND SIGN-UPS.
+anTV contains links and shortcuts to services and websites on the internet (streaming, media, shopping and others). TDSAS does
+not own, operate or control them, and is not responsible for them, for what is on them, for whether they work, for their
+privacy practices or for their prices and terms. TDSAS is not responsible for any sign-up, account, subscription, purchase or
+payment you make with any of them, and TDSAS receives nothing from them. Those are between you and that service. Names and
+logos belong to their owners; anTV is not connected to them.
+
+6. LIMIT OF LIABILITY.
+To the fullest extent the law allows, TDSAS is not liable for any loss or damage of any kind that comes from using, or not
+being able to use, anTV.
+
+7. NETWORK USE YOU CAN CONTROL.
+Unless you set Settings > Updates to "Never check", anTV contacts github.com from time to time to see whether a new version
+exists. It installs one by itself only if you choose "Install automatically". The phone remote and pop-up features work on
+your own network and are off unless you turn them on.
+"""
+LICENSE_SHORT = ("anTV is FREE. Never pay for it, and nobody may sell it or put it on a device that is sold.\n\n"
+                 "TDSAS is not responsible if anTV does not work properly, or for the internet services it links to "
+                 "or any sign-up or payment you make with them.\n\n"
+                 "The full license is in Settings > About > License and notices.")
+
+
+def show_license(parent, cfg):
+    show_text(parent, cfg, "License and notices", "License and notices", GLib.markup_escape_text(LICENSE_TEXT))
+
+
 POPULAR_LINKS = [  # (name, address, card color): shown in the Popular apps menu. Add more here.
+    ("NodeStore", "https://nodestore.space", "#3c873a"),
     ("Tiedye Sasquatch", "https://yeti.tiedyesasquatch.online", "#7b3fe4"),
     ("FreeBirth", "https://freebirth.ai.studio", "#e8833a"),
 ]
@@ -684,22 +752,185 @@ DEFAULT = {
         {"name": "YouTube", "type": "web", "url": "https://www.youtube.com/tv", "color": "#ff0000"},
         {"name": "Kodi", "type": "cmd", "cmd": "kodi", "color": "#17b2e7"},
         {"name": "VLC", "type": "cmd", "cmd": "vlc --fullscreen", "color": "#ff8800"},
+        {"name": "NodeStore", "type": "web", "url": "https://nodestore.space", "color": "#3c873a"},
     ],
+    "seeded_cards": ["nodestore"],  # standard cards already offered to this profile (a card you delete stays deleted)
 }
+
+# Cards added to existing setups once, the first time a profile runs this version: (key, card).
+SEED_CARDS = [("nodestore", {"name": "NodeStore", "type": "web", "url": "https://nodestore.space", "color": "#3c873a"})]
+
+
+def _all_cards(apps):
+    for a in apps:
+        yield a
+        if a.get("type") == "folder":
+            yield from _all_cards(a.get("apps", []))
+
+
+def seed_default_cards(cfg):
+    """Add the standard cards a profile has not been offered yet (once each; skipped if a card for the same website
+    is already there). Returns True if the config changed."""
+    done = cfg.get("seeded_cards")
+    if not isinstance(done, list):
+        done = cfg["seeded_cards"] = []
+    changed = False
+    for key, card in SEED_CARDS:
+        if key in done:
+            continue
+        done.append(key); changed = True
+        host = urlparse(card["url"]).hostname
+        if not any(urlparse(str(a.get("url", ""))).hostname == host for a in _all_cards(cfg.setdefault("apps", []))):
+            cfg["apps"].append(dict(card))
+    return changed
+
+
+# ---- user profiles: each person has their own apps, layout, look, background and website logins ----
+# Main's personal settings stay in config.json (so an older anTV still works); other profiles live in users/<id>.json.
+PROFILE_KEYS = ("apps", "favorite_builtins", "fav_layout", "show_others", "tile_font", "tile_size", "tile_shape",
+                "picture_fit", "clock", "background", "background_dir", "background_default", "background_shuffle",
+                "background_interval", "home_url", "seeded_cards", "builtin_images", "builtin_picture_only", "icon_pack",
+                "icon_pack_override", "icon_pack_picture_only", "colors_only")
+USERS_DIR = os.path.join(CFG_DIR, "users")
+MAIN_ID = "main"
+PROFILE_COLORS = ["#2a6df4", "#e5484d", "#30a46c", "#f5a524", "#8e4ec6", "#12a594", "#e5589b", "#7d8590"]
+
+
+def _read_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path + ".tmp", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+    os.replace(path + ".tmp", path)
+
+
+def profile_path(pid):
+    return os.path.join(USERS_DIR, pid + ".json")
+
+
+def ensure_profiles(cfg):
+    """Make sure cfg has a profile list that starts with Main and an active profile that exists."""
+    ps = cfg.get("profiles")
+    if not (isinstance(ps, list) and ps and all(isinstance(p, dict) and p.get("id") for p in ps)) or ps[0]["id"] != MAIN_ID:
+        cfg["profiles"] = [{"id": MAIN_ID, "name": "Main", "color": PROFILE_COLORS[0]}]
+    for p in cfg["profiles"]:
+        p.setdefault("name", p["id"]); p.setdefault("color", PROFILE_COLORS[0])
+    if cfg.get("active_profile") not in [p["id"] for p in cfg["profiles"]]:
+        cfg["active_profile"] = MAIN_ID
+    return cfg["profiles"]
+
+
+def profile_name(cfg, pid=None):
+    pid = pid or cfg.get("active_profile", MAIN_ID)
+    return next((p["name"] for p in ensure_profiles(cfg) if p["id"] == pid), "Main")
+
+
+def _load_personal(pid, main_cfg):
+    """The personal keys of profile pid, as a dict. Main's come from config.json (main_cfg)."""
+    if pid == MAIN_ID:
+        return {k: copy.deepcopy(main_cfg[k]) for k in PROFILE_KEYS if k in main_cfg}
+    data = _read_json(profile_path(pid)) or {}
+    out = {k: v for k, v in data.items() if k in PROFILE_KEYS}
+    out.setdefault("apps", copy.deepcopy(DEFAULT["apps"]))
+    return out
 
 
 def load():
-    try:
-        with open(CFG) as f:
-            return json.load(f)
-    except Exception:
-        return json.loads(json.dumps(DEFAULT))
+    cfg = _read_json(CFG) or json.loads(json.dumps(DEFAULT))
+    ensure_profiles(cfg)
+    pid = cfg["active_profile"]
+    if pid != MAIN_ID:  # the saved dict holds Main's personal keys: swap in this profile's
+        personal = _load_personal(pid, cfg)
+        for k in PROFILE_KEYS:
+            cfg.pop(k, None)
+        cfg.update(personal)
+    return cfg
 
 
 def save(cfg):
-    os.makedirs(CFG_DIR, exist_ok=True)
-    with open(CFG, "w") as f:
-        json.dump(cfg, f, indent=2)
+    """Write the settings. With a profile other than Main in use, its personal keys go to users/<id>.json and
+    config.json keeps Main's personal keys as they were."""
+    pid = cfg.get("active_profile", MAIN_ID)
+    if pid == MAIN_ID or not cfg.get("profiles"):
+        _write_json(CFG, cfg)
+        return
+    base = _read_json(CFG) or {}
+    for k in [k for k in base if k not in PROFILE_KEYS]:
+        del base[k]
+    base.update({k: v for k, v in cfg.items() if k not in PROFILE_KEYS})
+    _write_json(CFG, base)
+    _write_json(profile_path(pid), {k: cfg[k] for k in PROFILE_KEYS if k in cfg})
+
+
+def switch_profile(cfg, pid):
+    """Make profile pid the live one, in place (the other screens share this dict). Returns True if it changed."""
+    ensure_profiles(cfg)
+    if pid == cfg["active_profile"] or pid not in [p["id"] for p in cfg["profiles"]]:
+        return False
+    save(cfg)  # the profile being left is written to disk first
+    main_cfg = _read_json(CFG) or {}
+    personal = _load_personal(pid, main_cfg)
+    for k in PROFILE_KEYS:
+        cfg.pop(k, None)
+    cfg.update(personal)
+    cfg["active_profile"] = pid
+    save(cfg)
+    return True
+
+
+def profile_add(cfg, name, copy_current):
+    """Create a profile (a copy of the one in use, or fresh with the standard apps). Returns its id."""
+    ps = ensure_profiles(cfg)
+    base = re.sub(r"[^a-z0-9]", "", name.lower())[:10] or "user"
+    pid = "%s-%s" % (base, secrets.token_hex(2))
+    while any(p["id"] == pid for p in ps):
+        pid = "%s-%s" % (base, secrets.token_hex(2))
+    data = ({k: copy.deepcopy(cfg[k]) for k in PROFILE_KEYS if k in cfg} if copy_current
+            else {"apps": copy.deepcopy(DEFAULT["apps"]), "seeded_cards": list(DEFAULT["seeded_cards"])})
+    ps.append({"id": pid, "name": name, "color": PROFILE_COLORS[len(ps) % len(PROFILE_COLORS)]})
+    _write_json(profile_path(pid), data)
+    save(cfg)
+    return pid
+
+
+def profile_rename(cfg, pid, name):
+    for p in ensure_profiles(cfg):
+        if p["id"] == pid:
+            p["name"] = name
+    save(cfg)
+
+
+def profile_delete(cfg, pid):
+    """Remove a profile (never Main), with its settings file and saved website logins. Switches to Main first if needed."""
+    ensure_profiles(cfg)
+    if pid == MAIN_ID or pid not in [p["id"] for p in cfg["profiles"]]:
+        return False
+    if cfg["active_profile"] == pid:
+        switch_profile(cfg, MAIN_ID)
+    cfg["profiles"] = [p for p in cfg["profiles"] if p["id"] != pid]
+    save(cfg)
+    try:
+        os.remove(profile_path(pid))
+    except OSError:
+        pass
+    shutil.rmtree(os.path.join(CFG_DIR, "profiles", "u-" + pid), ignore_errors=True)
+    return True
+
+
+def browser_profile(cfg, sub):
+    """Folder for a browser's saved logins. Main keeps the original place; other profiles get their own."""
+    pid = cfg.get("active_profile", MAIN_ID)
+    base = os.path.join(CFG_DIR, "profiles") if pid == MAIN_ID else os.path.join(CFG_DIR, "profiles", "u-" + pid)
+    return os.path.join(base, sub)
+
 
 
 REMOTE_DEFAULTS = {  # remote button -> likely X11 key names (Fire TV remotes pair as Bluetooth keyboards)
@@ -813,15 +1044,356 @@ def hook_back(dlg, cfg):
     dlg.connect("key-press-event", on_key)
 
 
-def store_image(path):
-    """Copy a chosen background image into the config folder so it survives unplugged drives."""
-    d = os.path.join(CFG_DIR, "images")
-    os.makedirs(d, exist_ok=True)
-    if os.path.dirname(os.path.abspath(path)) == d:
-        return path
-    dst = os.path.join(d, f"{int(time.time() * 1000)}_{os.path.basename(path)}")
-    shutil.copy2(path, dst)
+# ---- pictures: shrinking (quality levels), icon packs, pictures for every card ----
+IMG_DIR = os.path.join(CFG_DIR, "images")          # copies of the pictures you chose (optimized)
+ORIG_DIR = os.path.join(CFG_DIR, "originals")      # untouched originals, so the quality can be changed later (not in backups)
+ORIG_INDEX = os.path.join(ORIG_DIR, "index.json")  # {picture path relative to the config folder: {"o": original file, "k": kind}}
+ICON_DIR = os.path.join(CFG_DIR, "iconpacks")      # one folder per imported icon pack
+PIC_LEVELS = ["original", "high", "balanced", "fast"]
+PIC_LEVEL_NAMES = ["Original (no shrinking)", "High (1024 px)", "Balanced (640 px)", "Fast (384 px, for slow systems)"]
+PIC_LIMITS = {  # level: (longest side of a card picture, longest side of a background, JPEG quality)
+    "original": (0, 0, 95), "high": (1024, 2560, 90), "balanced": (640, 1920, 82), "fast": (384, 1280, 70)}
+PACK_EXT = {".png", ".jpg", ".jpeg", ".webp", ".svg", ".gif", ".bmp"}
+PACK_MAX_FILES, PACK_MAX_FILE, PACK_MAX_TOTAL = 1000, 20 * 1024 * 1024, 300 * 1024 * 1024
+PIC_CFG = {}  # the live config (set by apply_pic_cfg) so the quality choice applies as soon as it is changed
+
+
+def apply_pic_cfg(cfg):
+    global PIC_CFG
+    PIC_CFG = cfg
+
+
+def pic_level():
+    v = PIC_CFG.get("pic_level", "high")
+    return v if v in PIC_LEVELS else "high"
+
+
+def pic_keep():
+    return bool(PIC_CFG.get("pic_keep", True))
+
+
+def pack_slug(text):
+    """'Tiedye Sasquatch' -> 'tiedye-sasquatch' (lowercase letters and digits, joined by hyphens)."""
+    return re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+
+
+def _relkey(path):
+    return os.path.relpath(path, CFG_DIR).replace(os.sep, "/")
+
+
+def _load_scaled(src, level, kind="card"):
+    """The picture as a pixbuf, shrunk to the level's size (never enlarged). None if it can't be read."""
+    if GdkPixbuf is None:
+        return None
+    mx, bgmx, _q = PIC_LIMITS[level]
+    limit = bgmx if kind == "bg" else mx
+    try:
+        if src.lower().endswith(".svg"):  # drawn at the size needed (vector)
+            n = limit or 2048
+            return GdkPixbuf.Pixbuf.new_from_file_at_size(src, n, n)
+        pb = GdkPixbuf.Pixbuf.new_from_file(src)
+        pb = pb.apply_embedded_orientation() or pb
+        w, h = pb.get_width(), pb.get_height()
+        if limit and max(w, h) > limit:
+            sc = limit / float(max(w, h))
+            pb = pb.scale_simple(max(1, round(w * sc)), max(1, round(h * sc)), GdkPixbuf.InterpType.HYPER)
+        return pb
+    except Exception:
+        return None
+
+
+def _save_pb(pb, dst, level):
+    """Write a pixbuf as PNG (transparent pictures, or a .png name) or JPEG (a .jpg name)."""
+    q = PIC_LIMITS[level][2]
+    tmp = dst + ".tmp"
+    if os.path.splitext(dst)[1].lower() in (".jpg", ".jpeg") and not pb.get_has_alpha():
+        pb.savev(tmp, "jpeg", ["quality"], [str(q)])
+    else:
+        pb.savev(tmp, "png", [], [])
+    os.replace(tmp, dst)
+
+
+def optimized_copy(src, dst_dir, stem, kind="card", level=None):
+    """Put a shrunk copy of src in dst_dir as <stem>.jpg or <stem>.png (photos become JPEG, transparent pictures PNG;
+    animated GIFs and the 'Original' level are copied unchanged). Returns the new path."""
+    os.makedirs(dst_dir, exist_ok=True)
+    level = level or pic_level()
+    sext = os.path.splitext(src)[1].lower()
+    pb = None if (level == "original" and sext != ".svg") or sext == ".gif" else _load_scaled(src, level, kind)
+    if pb is None:
+        dst = os.path.join(dst_dir, stem + sext)
+        if os.path.abspath(src) != os.path.abspath(dst):
+            shutil.copy2(src, dst)
+        return dst
+    dst = os.path.join(dst_dir, stem + (".png" if pb.get_has_alpha() else ".jpg"))
+    _save_pb(pb, dst, level)
     return dst
+
+
+def keep_original(dst, src, kind="card"):
+    """Remember the untouched picture src for the optimized file dst, so the quality can be changed later."""
+    if not pic_keep() or dst.lower().endswith(".gif") or os.path.abspath(src) == os.path.abspath(dst):
+        return
+    if os.path.splitext(src)[1].lower() == os.path.splitext(dst)[1].lower() and pic_level() == "original":
+        return  # dst is itself the original
+    os.makedirs(ORIG_DIR, exist_ok=True)
+    o = "%s_%s" % (secrets.token_hex(4), os.path.basename(src))
+    shutil.copy2(src, os.path.join(ORIG_DIR, o))
+    idx = _read_json(ORIG_INDEX) or {}
+    idx[_relkey(dst)] = {"o": o, "k": kind}
+    _write_json(ORIG_INDEX, idx)
+
+
+def store_image(path, kind="card"):
+    """Copy a chosen picture into the config folder (so it survives an unplugged drive), shrunk to the picture quality
+    level. kind 'bg' is for backgrounds (larger)."""
+    os.makedirs(IMG_DIR, exist_ok=True)
+    if os.path.dirname(os.path.abspath(path)) == IMG_DIR:
+        return path
+    stem = re.sub(r'[\\/:*?"<>|]', "_", "%d_%s" % (int(time.time() * 1000), os.path.splitext(os.path.basename(path))[0]))
+    dst = optimized_copy(path, IMG_DIR, stem, kind)
+    keep_original(dst, path, kind)
+    return dst
+
+
+def _picture_files(root):
+    for r, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for f in files:
+            if not f.startswith(".") and os.path.splitext(f)[1].lower() in PACK_EXT:
+                yield os.path.join(r, f)
+
+
+def count_pictures():
+    return sum(1 for root in (IMG_DIR, ICON_DIR) for _ in _picture_files(root))
+
+
+def reoptimize_all():
+    """Redo every stored card picture and icon-pack picture at the current quality level, from the originals when they
+    were kept (otherwise from the file itself, which can only get smaller). Returns how many files were redone."""
+    level, n = pic_level(), 0
+    idx = _read_json(ORIG_INDEX) or {}
+    for root in (IMG_DIR, ICON_DIR):
+        for f in list(_picture_files(root)):
+            if f.lower().endswith(".gif"):
+                continue
+            key, ent, kind = _relkey(f), None, "card"
+            ent = idx.get(key)
+            if ent and os.path.isfile(os.path.join(ORIG_DIR, ent["o"])):
+                src, kind = os.path.join(ORIG_DIR, ent["o"]), ent.get("k", "card")
+            elif pic_keep() and level != "original":  # first time: keep what is there as the original
+                os.makedirs(ORIG_DIR, exist_ok=True)
+                o = "%s_%s" % (secrets.token_hex(4), os.path.basename(f))
+                shutil.copy2(f, os.path.join(ORIG_DIR, o))
+                idx[key] = {"o": o, "k": kind}
+                src = os.path.join(ORIG_DIR, o)
+            else:
+                src = f
+            pb = _load_scaled(src, level, kind)
+            if pb is None:
+                continue
+            try:
+                _save_pb(pb, f, level)
+                n += 1
+            except Exception:
+                pass
+    if idx:
+        _write_json(ORIG_INDEX, idx)
+    return n
+
+
+# ---- icon packs: a folder or zip of pictures named after the cards ----
+ICONPACK_HELP = (
+    "<b>What an icon pack is</b>\nA folder (or .zip) of pictures. Import it in Settings > Pictures &amp; icons and every card "
+    "that has a matching picture changes at once. Your own pictures are not deleted: switch the pack off and they come back.\n\n"
+    "<b>How pictures are named</b> (lowercase letters, digits and hyphens; the file type can be png, jpg, webp, svg, gif or bmp)\n"
+    "1. The card's name: <b>netflix.png</b>, <b>nodestore.png</b>, <b>tiedye-sasquatch.png</b> (\"Disney+\" becomes <b>disney.png</b>).\n"
+    "2. The built-in cards: <b>back</b>, <b>add-app</b>, <b>add-node</b>, <b>install-apk</b>, <b>web-browser</b>, "
+    "<b>local-media</b>, <b>usb</b> (all USB drives).\n"
+    "3. A fallback by kind of card, for cards the pack has no picture for: <b>type-web</b>, <b>type-command</b>, "
+    "<b>type-node</b>, <b>type-android</b>, <b>type-folder</b>.\n\n"
+    "<b>Optional pack.json</b> in the pack: {\"name\": \"My pack\", \"map\": {\"netflix\": \"n-logo.png\"}} gives the pack a name "
+    "and points a card name at a differently named file.\n\n"
+    "<b>Color only</b>: a card can always be color only (tick it in the card's form, or in Settings > Pictures &amp; icons for the "
+    "built-in cards), and \"Cards: colors only\" hides every picture.\n\n"
+    "<b>Speed</b>: pictures are shrunk when they are added, to the quality level you choose.")
+
+
+def show_iconpack_help(parent, cfg):
+    show_text(parent, cfg, "Icon packs", "Icon packs and picture names", ICONPACK_HELP)
+
+
+def list_iconpacks():
+    try:
+        return sorted((d for d in os.listdir(ICON_DIR) if not d.startswith(".") and os.path.isdir(os.path.join(ICON_DIR, d))),
+                      key=str.lower)
+    except OSError:
+        return []
+
+
+def import_iconpack(src, name=None):
+    """Import an icon pack from a folder or a .zip. Pictures are renamed to lowercase-hyphen names, shrunk to the
+    quality level, and put in iconpacks/<name>/. Returns (pack name, number of pictures). Raises ValueError."""
+    items = []  # (stem, file name, reader)
+    meta = {}
+    if os.path.isdir(src):
+        for p in _picture_files(src):
+            items.append((os.path.splitext(os.path.basename(p))[0], os.path.basename(p), lambda p=p: open(p, "rb").read(),
+                          os.path.getsize(p)))
+        meta = _read_json(os.path.join(src, "pack.json")) or {}
+        default_name = os.path.basename(os.path.abspath(src).rstrip("/\\"))
+    else:
+        try:
+            z = zipfile.ZipFile(src)
+        except zipfile.BadZipFile:
+            raise ValueError("That is not a valid zip file.")
+        with z:
+            for zi in z.infolist():
+                parts = zi.filename.replace("\\", "/").split("/")
+                base = parts[-1]
+                if zi.is_dir() or ".." in parts or zi.filename.startswith("/") or re.match(r"^[A-Za-z]:", zi.filename) \
+                        or "__MACOSX" in parts or any(x.startswith(".") for x in parts):
+                    continue
+                if base.lower() == "pack.json" and not meta:
+                    try:
+                        meta = json.loads(z.read(zi).decode("utf-8")) if zi.file_size < 65536 else {}
+                    except Exception:
+                        meta = {}
+                elif os.path.splitext(base)[1].lower() in PACK_EXT:
+                    items.append((os.path.splitext(base)[0], base, lambda zi=zi, z=z: z.read(zi), zi.file_size))
+            default_name = os.path.splitext(os.path.basename(src))[0]
+            return _build_pack(items, meta, name or default_name)
+    return _build_pack(items, meta, name or default_name)
+
+
+def _build_pack(items, meta, default_name):
+    import tempfile
+    meta = meta if isinstance(meta, dict) else {}
+    if not items:
+        raise ValueError("No pictures (png, jpg, webp, svg, gif, bmp) were found in that icon pack.")
+    if len(items) > PACK_MAX_FILES:
+        raise ValueError("That icon pack has more than %d pictures." % PACK_MAX_FILES)
+    if sum(i[3] for i in items) > PACK_MAX_TOTAL or any(i[3] > PACK_MAX_FILE for i in items):
+        raise ValueError("That icon pack is too big (pictures over 20 MB, or more than 300 MB in all).")
+    pname = re.sub(r"[^\w .-]", "", str(meta.get("name") or default_name)).strip(" .") or "icon pack"
+    final = os.path.join(ICON_DIR, pname)
+    os.makedirs(ICON_DIR, exist_ok=True)
+    tag = secrets.token_hex(3)
+    old = None
+    if os.path.isdir(final):  # importing again replaces the pack
+        old = os.path.join(ICON_DIR, ".old-" + tag)
+        os.replace(final, old)
+    made, seen = 0, set()
+    try:
+        os.makedirs(final)
+        with tempfile.TemporaryDirectory() as tmp:
+            for stem, base, reader, _sz in items:
+                slug = pack_slug(stem)
+                if not slug or slug in seen:
+                    continue
+                raw = os.path.join(tmp, "raw" + os.path.splitext(base)[1].lower())
+                with open(raw, "wb") as f:
+                    f.write(reader())
+                if GdkPixbuf is not None and not raw.lower().endswith(".gif") and _load_scaled(raw, "fast") is None:
+                    continue  # not a readable picture
+                dst = optimized_copy(raw, final, slug)
+                keep_original(dst, raw)
+                seen.add(slug); made += 1
+        if not made:
+            raise ValueError("None of the pictures in that icon pack could be read.")
+        mp = meta.get("map") if isinstance(meta.get("map"), dict) else {}
+        clean = {pack_slug(k): pack_slug(os.path.splitext(str(v))[0]) for k, v in mp.items() if pack_slug(k) and pack_slug(v)}
+        _write_json(os.path.join(final, "pack.json"), {"name": pname, "map": clean})
+    except Exception:
+        shutil.rmtree(final, ignore_errors=True)
+        if old:
+            os.replace(old, final)
+        raise
+    if old:
+        shutil.rmtree(old, ignore_errors=True)
+    _PACK_CACHE.pop(pname, None)
+    return pname, made
+
+
+def delete_iconpack(name):
+    shutil.rmtree(os.path.join(ICON_DIR, name), ignore_errors=True)
+    _PACK_CACHE.pop(name, None)
+    idx = _read_json(ORIG_INDEX)
+    if idx:
+        pre = "iconpacks/%s/" % name
+        for k in [k for k in idx if k.startswith(pre)]:
+            try:
+                os.remove(os.path.join(ORIG_DIR, idx[k]["o"]))
+            except OSError:
+                pass
+            del idx[k]
+        _write_json(ORIG_INDEX, idx)
+
+
+_PACK_CACHE = {}
+
+
+def pack_icons(name):
+    """({picture name: path}, {card name: picture name}) of an installed icon pack."""
+    d = os.path.join(ICON_DIR, name)
+    try:
+        stamp = os.stat(d).st_mtime
+    except OSError:
+        return {}, {}
+    hit = _PACK_CACHE.get(name)
+    if hit and hit[0] == stamp:
+        return hit[1], hit[2]
+    files = {}
+    for p in sorted(_picture_files(d)):
+        files.setdefault(os.path.splitext(os.path.basename(p))[0], p)
+    meta = _read_json(os.path.join(d, "pack.json")) or {}
+    mp = meta.get("map") if isinstance(meta.get("map"), dict) else {}
+    _PACK_CACHE[name] = (stamp, files, mp)
+    return files, mp
+
+
+SPECIAL_ICON = {"up": "back", "add": "add-app", "addnode": "add-node", "apk": "install-apk", "local": "local-media",
+                "browser": "web-browser", "drive": "usb"}
+TYPE_ICON = {"web": "type-web", "cmd": "type-command", "node": "type-node", "android": "type-android", "folder": "type-folder"}
+BUILTIN_CARDS = [("up", "Back"), ("add", "Add app"), ("addnode", "Node.js app"), ("apk", "Install APK"),
+                 ("browser", "Web Browser"), ("local", "Local Media"), ("drive", "USB drives (all)")]
+
+
+def card_names(a):
+    """Picture names an icon pack can match for card a, most specific first."""
+    sp = a.get("special")
+    if sp:
+        return [SPECIAL_ICON.get(sp, sp)]
+    out = [pack_slug(a.get("name", ""))]
+    out.append(TYPE_ICON.get(a.get("type", "web"), "type-web"))
+    return [n for n in out if n]
+
+
+def card_picture(cfg, a):
+    """(picture path, picture-only) for a card, or None for a plain color card. Order: color only (card or all cards) ->
+    the card's own picture -> the icon pack's picture (which wins over the card's own only if the pack is set to)."""
+    if cfg.get("colors_only"):
+        return None
+    sp = a.get("special")
+    if sp:
+        own = (cfg.get("builtin_images") or {}).get(sp)
+        off, only = own == "", sp in (cfg.get("builtin_picture_only") or [])
+    else:
+        own, off, only = a.get("image"), bool(a.get("no_picture")), bool(a.get("picture_only"))
+    if off:
+        return None
+    has_own = bool(own) and os.path.isfile(own)
+    pk = None
+    if cfg.get("icon_pack"):
+        files, mp = pack_icons(cfg["icon_pack"])
+        for n in card_names(a):
+            p = files.get(mp.get(n, n))
+            if p:
+                pk = p
+                break
+    if pk and (cfg.get("icon_pack_override") or not has_own):
+        return pk, only or bool(cfg.get("icon_pack_picture_only"))
+    return (own, only) if has_own else None
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -864,19 +1436,19 @@ def seed_backgrounds():
 
 
 def add_backgrounds(paths):
-    """Copy pictures into the default backgrounds folder. Returns how many were added."""
+    """Copy pictures into the default backgrounds folder (shrunk to the picture quality level). Returns how many were added."""
     os.makedirs(BG_DIR, exist_ok=True)
     n = 0
     for p in paths:
         if os.path.splitext(p)[1].lower() not in BG_EXT or not os.path.isfile(p):
             continue
-        base, ext = os.path.splitext(os.path.basename(p))
-        dst, k = os.path.join(BG_DIR, base + ext), 2
-        if os.path.abspath(p) == os.path.abspath(dst):
+        if os.path.dirname(os.path.abspath(p)) == os.path.abspath(BG_DIR):
             continue
-        while os.path.exists(dst):
-            dst, k = os.path.join(BG_DIR, "%s_%d%s" % (base, k, ext)), k + 1
-        shutil.copy2(p, dst)
+        base, ext = os.path.splitext(os.path.basename(p))
+        stem, k = base, 2
+        while any(os.path.exists(os.path.join(BG_DIR, stem + e)) for e in {ext, ".jpg", ".png"}):
+            stem, k = "%s_%d" % (base, k), k + 1
+        optimized_copy(p, BG_DIR, stem, "bg")
         n += 1
     return n
 
@@ -892,7 +1464,7 @@ def open_path(path):
         pass
 
 
-BACKUP_DIRS = ("images", "backgrounds")  # saved in a backup next to config.json (browser logins are not)
+BACKUP_DIRS = ("images", "backgrounds", "users", "iconpacks")  # saved in a backup next to config.json (browser logins are not)
 
 
 def make_backup(dest_dir):
@@ -940,13 +1512,17 @@ def restore_backup(path):
                 return {k: fix(x) for k, x in v.items()}
             return v
         cfg = fix(cfg)
-    save(cfg)
-    return cfg
+        for f in glob.glob(os.path.join(USERS_DIR, "*.json")):  # the other profiles hold picture paths too
+            data = _read_json(f)
+            if data is not None:
+                _write_json(f, fix(data))
+    _write_json(CFG, cfg)  # as backed up (Main's personal keys included); load() then picks the active profile
+    return load()
 
 
 def wipe_data():
-    """Delete settings, card pictures, backgrounds, browser profiles (logins) and logs."""
-    for n in ("images", "backgrounds", "profiles", "logs"):
+    """Delete settings, profiles, card pictures, backgrounds, browser logins and logs."""
+    for n in ("images", "backgrounds", "iconpacks", "originals", "profiles", "users", "logs"):
         shutil.rmtree(os.path.join(CFG_DIR, n), ignore_errors=True)
     try:
         os.remove(CFG)
@@ -963,7 +1539,7 @@ UPDATE_MODES = ["off", "ask", "auto"]                # Settings: never / check a
 UPDATE_EVERY = 12 * 3600                             # seconds between automatic checks
 UPDATE_KEEP = 5                                      # old versions kept for "go back"
 UPDATE_MAX = 100 * 1024 * 1024
-UPDATE_TOP = ("Setup-TVHub.ps1", "Setup-TVHub.bat")  # besides tvhub.py, *.md next to it, and these folders:
+UPDATE_TOP = ("Setup-TVHub.ps1", "Setup-TVHub.bat", "LICENSE.txt")  # besides tvhub.py, *.md next to it, and these folders:
 UPDATE_DIRS = ("tasks", "backgrounds")
 SELF_PATH = os.path.abspath(__file__)
 RESTART = {"want": False}
@@ -2612,6 +3188,7 @@ SHORTCUTS = [
     ("H", "Hide anTV to the taskbar (click it there to bring it back)"),
     ("Esc or Q", "Quit anTV"),
     ("I", "Install an APK (Android app) on a connected device"),
+    ("P", "Choose who is watching (switch profile); Settings > Profiles adds, renames and deletes them"),
     ("U", "Install the update (or restart to finish it) when the green update button shows next to the clock"),
     ("Ctrl+Alt+K", "Close the running app and come back"),
 ]
@@ -2663,8 +3240,8 @@ class TVSettings(Gtk.Window):
         for lb in (self.cats, self.opts):
             lb.set_selection_mode(Gtk.SelectionMode.BROWSE)
         self.cat_defs = [("Apps & favorites", self.rows_apps), ("Layout", self.rows_layout), ("Look", self.rows_look),
-                         ("Screen & browser", self.rows_system), ("Remote & devices", self.rows_devices),
-                         ("Pop-ups", self.rows_popups), ("Updates", self.rows_updates), ("Your data", self.rows_data),
+                         ("Pictures & icons", self.rows_pictures), ("Screen & browser", self.rows_system), ("Remote & devices", self.rows_devices),
+                         ("Pop-ups", self.rows_popups), ("Profiles", self.rows_profiles), ("Updates", self.rows_updates), ("Your data", self.rows_data),
                          ("About", self.rows_about)]
         for name, _fn in self.cat_defs:
             rw = Gtk.ListBoxRow(); lab = Gtk.Label(label=name, xalign=0); lab.set_ellipsize(Pango.EllipsizeMode.END)
@@ -3066,6 +3643,100 @@ class TVSettings(Gtk.Window):
             {"kind": "number", "label": "Faintest card opacity", "key": "idle_min", "default": 15, "min": 0, "max": 100,
              "step": 5, "unit": " %"}]
 
+    # ---- pictures & icons
+    def rows_pictures(self):
+        c = self.cfg
+
+        def lvl_get():
+            v = c.get("pic_level", "high")
+            return PIC_LEVELS.index(v if v in PIC_LEVELS else "high")
+        rows = [
+            {"kind": "choice", "label": "Picture quality (lower = loads faster)", "opts": PIC_LEVEL_NAMES, "get": lvl_get,
+             "set": lambda i: c.__setitem__("pic_level", PIC_LEVELS[i])},
+            {"kind": "action", "label": "Re-optimize my pictures now", "value": lambda: "%d pictures" % count_pictures(),
+             "run": self.reoptimize},
+            {"kind": "toggle", "label": "Keep the original pictures (so quality can be raised later)", "key": "pic_keep", "default": True},
+            {"kind": "toggle", "label": "Cards: colors only (hide every picture)", "key": "colors_only", "default": False},
+            {"kind": "action", "label": "Icon pack in use", "value": lambda: c.get("icon_pack") or "None", "run": self.set_pack},
+            {"kind": "action", "label": "Import an icon pack\u2026", "run": self.import_pack},
+            {"kind": "toggle", "label": "Icon pack replaces my own pictures", "key": "icon_pack_override", "default": False},
+            {"kind": "toggle", "label": "Icon pack: show only the picture (hide names)", "key": "icon_pack_picture_only", "default": False},
+            {"kind": "action", "label": "Remove an icon pack\u2026", "run": self.remove_pack},
+            {"kind": "action", "label": "Open the icon packs folder", "run": lambda: (os.makedirs(ICON_DIR, exist_ok=True), open_path(ICON_DIR))},
+            {"kind": "action", "label": "How to name pictures in an icon pack", "run": lambda: show_iconpack_help(self, c)}]
+        for key, label in BUILTIN_CARDS:
+            rows.append({"kind": "action", "label": "Picture: " + label, "value": lambda k=key: self.builtin_state(k),
+                         "run": lambda k=key, l=label: self.set_builtin_pic(k, l)})
+        return rows
+
+    def builtin_state(self, key):
+        v = (self.cfg.get("builtin_images") or {}).get(key)
+        if v == "":
+            return "color only"
+        return os.path.basename(v) if v else ("icon pack" if self.cfg.get("icon_pack") else "color")
+
+    def set_builtin_pic(self, key, label):
+        c = self.cfg
+        only = key in (c.get("builtin_picture_only") or [])
+        i = self.choose("Picture for: " + label, ["Choose a picture\u2026", "Remove my picture", "Color only (never a picture)",
+                                                 "Show the name too" if only else "Show only the picture (hide the name)", "Cancel"])
+        bi = dict(c.get("builtin_images") or {})
+        if i == 0:
+            p = self.pick_path("Choose a picture for " + label, images=True)
+            if p:
+                bi[key] = store_image(p)
+        elif i == 1:
+            bi.pop(key, None)
+        elif i == 2:
+            bi[key] = ""
+        elif i == 3:
+            st = set(c.get("builtin_picture_only") or [])
+            (st.discard if only else st.add)(key)
+            c["builtin_picture_only"] = sorted(st)
+        c["builtin_images"] = bi
+
+    def reoptimize(self):
+        r = run_busy(self, self.cfg, "Optimizing pictures\u2026", reoptimize_all)
+        self.hub.toast("Optimized %d picture%s" % (r.get("v", 0), "" if r.get("v", 0) == 1 else "s") if "v" in r
+                       else "Couldn't optimize: %s" % r.get("e"))
+
+    def set_pack(self):
+        packs = list_iconpacks()
+        if not packs:
+            self.hub.toast("No icon packs yet. Choose \"Import an icon pack\".")
+            return
+        i = self.choose("Icon pack in use", ["None (no icon pack)"] + packs + ["Cancel"])
+        if i == 0:
+            self.cfg.pop("icon_pack", None)
+        elif i is not None and i <= len(packs):
+            self.cfg["icon_pack"] = packs[i - 1]
+
+    def import_pack(self):
+        i = self.choose("Import an icon pack", ["From a .zip file\u2026", "From a folder\u2026", "Cancel"])
+        if i not in (0, 1):
+            return
+        p = (choose_path(self, self.cfg, "Choose an icon pack (.zip)", pattern="*.zip") if i == 0
+             else choose_path(self, self.cfg, "Choose an icon pack folder", folder=True))
+        if not p:
+            return
+        r = run_busy(self, self.cfg, "Importing the icon pack\u2026", lambda: import_iconpack(p))
+        if "e" in r:
+            self.hub.data_box(self, "Couldn't import that icon pack:\n%s" % r["e"], Gtk.MessageType.ERROR)
+            return
+        self.cfg["icon_pack"] = r["v"][0]
+        self.hub.toast("Icon pack \"%s\": %d pictures. It is now in use." % r["v"])
+
+    def remove_pack(self):
+        packs = list_iconpacks()
+        if not packs:
+            self.hub.toast("There are no icon packs to remove")
+            return
+        i = self.choose("Remove which icon pack?", packs + ["Cancel"])
+        if i is not None and i < len(packs):
+            delete_iconpack(packs[i])
+            if self.cfg.get("icon_pack") == packs[i]:
+                self.cfg.pop("icon_pack", None)
+
     def set_font(self):
         f = self.pick_font()
         if f:
@@ -3090,7 +3761,7 @@ class TVSettings(Gtk.Window):
         if i == 0:
             path = self.pick_path("Choose a background picture", images=True)
             if path:
-                self.cfg["background"] = store_image(path)
+                self.cfg["background"] = store_image(path, "bg")
         elif i == 1:
             self.cfg.pop("background", None)
 
@@ -3176,6 +3847,19 @@ class TVSettings(Gtk.Window):
             srcs.pop(i - 1)
         self.cfg["popup_sources"] = srcs
 
+    def rows_profiles(self):
+        c = self.cfg
+
+        def closes(fn):  # a flow that returns True changed the profile in use: leave Settings so nothing stale is edited
+            if self.hidden(fn):
+                GLib.idle_add(self.finish)
+        return [{"kind": "toggle", "label": "Ask who's watching when anTV starts", "key": "profile_ask", "default": False},
+                {"kind": "action", "label": "Profile in use (choose who's watching)", "value": lambda: profile_name(c),
+                 "run": lambda: closes(lambda: self.hub.profile_pick_flow(self.hub))},
+                {"kind": "action", "label": "Add a profile\u2026", "run": lambda: closes(lambda: self.hub.profile_add_flow(self.hub))},
+                {"kind": "action", "label": "Rename a profile\u2026", "run": lambda: self.hidden(lambda: self.hub.profile_rename_flow(self.hub))},
+                {"kind": "action", "label": "Delete a profile\u2026", "run": lambda: closes(lambda: self.hub.profile_delete_flow(self.hub))}]
+
     def rows_updates(self):
         c = self.cfg
         names = ["Never check", "Check and tell me", "Install automatically"]
@@ -3219,6 +3903,7 @@ class TVSettings(Gtk.Window):
                  "run": lambda: show_history(self, self.cfg)},
                 {"kind": "action", "label": "What's new (version history)", "run": lambda: show_history(self, self.cfg)},
                 {"kind": "action", "label": "Keyboard shortcuts", "run": lambda: show_shortcuts(self, self.cfg)},
+                {"kind": "action", "label": "License and notices (anTV is free: never pay for it)", "run": lambda: show_license(self, self.cfg)},
                 *self.rows_style()]
 
     def rows_style(self):
@@ -3340,6 +4025,9 @@ class Hub(Gtk.Window):
     def __init__(self):
         super().__init__(title="anTV")
         self.cfg = load()
+        apply_pic_cfg(self.cfg)
+        if seed_default_cards(self.cfg):
+            save(self.cfg)
         seed_backgrounds()
         self.set_name("hub")
         self.last_input, self.cur_op = time.monotonic(), 1.0
@@ -3375,6 +4063,10 @@ class Hub(Gtk.Window):
         self.rbox.set_tooltip_text("Click to hide"); self.rbox.set_no_show_all(True); self.rbox.set_visible(False)
         self.rbox.connect("button-press-event", lambda *_a: self.hide_remote_badge())
         head.pack_start(self.rbox, False, False, 0)
+        self.prof_btn = Gtk.Button(); self.prof_btn.set_name("prof"); self.prof_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.prof_btn.set_valign(Gtk.Align.CENTER); self.prof_btn.set_no_show_all(True); self.prof_btn.set_visible(False)
+        self.prof_btn.connect("clicked", lambda _b: self.profile_pick_flow(self))
+        head.pack_start(self.prof_btn, False, False, 0)
         self.upd_btn = Gtk.Button(); self.upd_btn.set_name("upd"); self.upd_btn.set_relief(Gtk.ReliefStyle.NONE)
         self.upd_btn.set_valign(Gtk.Align.CENTER); self.upd_btn.set_no_show_all(True); self.upd_btn.set_visible(False)
         self.upd_btn.connect("clicked", lambda _b: self.update_badge_click())
@@ -3435,6 +4127,8 @@ class Hub(Gtk.Window):
         threading.Thread(target=self.start_keepalive_servers, daemon=True).start()
         GLib.timeout_add_seconds(45, lambda: (update_confirm(), False)[1])  # a just-installed version that got this far is fine
         GLib.timeout_add_seconds(30, self.update_first)
+        self.refresh_profile_chip()
+        GLib.timeout_add(700, self.first_questions)
 
     # ---- idle fade ----
     def touch(self):
@@ -3586,6 +4280,7 @@ class Hub(Gtk.Window):
     def refresh_all(self):
         self.path = []
         self.apply_bg(); self.rebuild(); self.place(); self.web.apply()
+        self.refresh_profile_chip()
 
     def backup_data(self, parent=None):
         """Save your data and settings: a zip in a folder you choose."""
@@ -3646,6 +4341,117 @@ class Hub(Gtk.Window):
         seed_backgrounds(); save(self.cfg); self.refresh_all()
         self.toast("All data deleted. anTV is as new.")
         return True
+
+    # ---- license notice and profiles
+    def first_questions(self):
+        """Once, after start: the license notice (first time only), then 'Who's watching?' if that is turned on."""
+        if not self.cfg.get("license_seen"):
+            i = choose_dialog(self, self.cfg, "anTV is free", ["OK, got it", "Read the full license"], LICENSE_SHORT)
+            if i == 1:
+                show_license(self, self.cfg)
+            self.cfg["license_seen"] = True
+            save(self.cfg)
+        if self.cfg.get("profile_ask") and len(ensure_profiles(self.cfg)) > 1:
+            self.profile_pick_flow(self, startup=True)
+        return False
+
+    def refresh_profile_chip(self):
+        """The active profile's name next to the clock (only when there is more than one profile)."""
+        ps = ensure_profiles(self.cfg)
+        if len(ps) < 2:
+            self.prof_btn.set_visible(False)
+            return
+        p = next(p for p in ps if p["id"] == self.cfg["active_profile"])
+        lab = self.prof_btn.get_child()
+        if lab is None:
+            lab = Gtk.Label(); self.prof_btn.add(lab); lab.show()
+        lab.set_markup('<span foreground="%s">\u25cf</span>  %s' % (GLib.markup_escape_text(p["color"]), GLib.markup_escape_text(p["name"])))
+        self.prof_btn.set_visible(True)
+
+    def profile_activate(self, pid):
+        if switch_profile(self.cfg, pid):
+            if seed_default_cards(self.cfg):
+                save(self.cfg)
+            seed_backgrounds()
+            self.refresh_all()
+            self.refresh_profile_chip()
+            self.toast("Profile: %s" % profile_name(self.cfg))
+            return True
+        return False
+
+    def profile_pick_flow(self, parent=None, startup=False):
+        """'Who's watching?' list. True if the profile changed. Also the way in to adding a profile."""
+        parent = parent or self
+        ps = ensure_profiles(self.cfg)
+        names = ["%s%s" % (p["name"], "   (now)" if p["id"] == self.cfg["active_profile"] else "") for p in ps]
+        i = choose_dialog(parent, self.cfg, "Who's watching?", names + ["+  Add a profile\u2026"],
+                          "Each profile has its own apps, layout, look, background and website logins." if len(ps) < 2 else None)
+        if i is None:
+            return False
+        if i == len(ps):
+            return self.profile_add_flow(parent)
+        return self.profile_activate(ps[i]["id"])
+
+    def profile_add_flow(self, parent=None):
+        parent = parent or self
+        name = ask_text(parent, self.cfg, "New profile", "Name of the person (for example Sam, Kids, Guest):")
+        if not name:
+            return False
+        name = name[:24]
+        if name.lower() in [p["name"].lower() for p in ensure_profiles(self.cfg)]:
+            self.data_box(parent, "There is already a profile called %s." % name, Gtk.MessageType.ERROR)
+            return False
+        how = choose_dialog(parent, self.cfg, "Start %s with\u2026" % name,
+                            ["A copy of the apps and look I have now", "A fresh start (the standard apps)", "Cancel"],
+                            "Logins to websites (Netflix and so on) are never copied: each profile signs in on its own.")
+        if how is None or how == 2:
+            return False
+        pid = profile_add(self.cfg, name, how == 0)
+        self.refresh_profile_chip()
+        if choose_dialog(parent, self.cfg, "Profile added", ["Switch to %s now" % name, "Not now"], "%s was added." % name) == 0:
+            return self.profile_activate(pid)
+        return False
+
+    def _profile_choice(self, parent, title, text, skip_main=False):
+        ps = [p for p in ensure_profiles(self.cfg) if not (skip_main and p["id"] == MAIN_ID)]
+        if not ps:
+            self.data_box(parent, "There is no other profile yet. Add one first.")
+            return None
+        i = choose_dialog(parent, self.cfg, title, [p["name"] for p in ps] + ["Cancel"], text)
+        return ps[i]["id"] if i is not None and i < len(ps) else None
+
+    def profile_rename_flow(self, parent=None):
+        parent = parent or self
+        pid = self._profile_choice(parent, "Rename which profile?", None)
+        if not pid:
+            return False
+        new = ask_text(parent, self.cfg, "Rename profile", "New name:", profile_name(self.cfg, pid))
+        if not new:
+            return False
+        new = new[:24]
+        if new.lower() in [p["name"].lower() for p in self.cfg["profiles"] if p["id"] != pid]:
+            self.data_box(parent, "There is already a profile called %s." % new, Gtk.MessageType.ERROR)
+            return False
+        profile_rename(self.cfg, pid, new)
+        self.refresh_profile_chip()
+        return False
+
+    def profile_delete_flow(self, parent=None):
+        """True if the profile in use was deleted (anTV switched to Main)."""
+        parent = parent or self
+        pid = self._profile_choice(parent, "Delete which profile?", "Main can't be deleted.", skip_main=True)
+        if not pid:
+            return False
+        name, was_active = profile_name(self.cfg, pid), pid == self.cfg["active_profile"]
+        if choose_dialog(parent, self.cfg, "Delete %s?" % name, ["No, keep it", "Yes, delete %s" % name],
+                         "Its apps, layout, look and saved website logins are deleted. This cannot be undone.") != 1:
+            return False
+        profile_delete(self.cfg, pid)
+        if was_active:
+            seed_backgrounds(); self.refresh_all()
+        self.refresh_profile_chip()
+        self.toast("Deleted %s" % name)
+        return was_active
 
     # ---- updates (GitHub or a file)
     def restart_app(self):
@@ -4028,6 +4834,8 @@ class Hub(Gtk.Window):
                "#cog:hover,#cog:focus{background:#2a6df4;color:white;}#clock{color:#e8eef9;font-size:38px;font-weight:bold;}#status{color:#9ecbff;font-size:26px;font-weight:bold;}#rinfo{color:#9ecbff;font-size:22px;font-weight:bold;}"
                "#upd{background:#1f6f43;border:none;box-shadow:none;color:white;font-size:26px;font-weight:bold;padding:4px 18px;border-radius:22px;}"
                "#upd:hover,#upd:focus{background:#2a9d5c;}"
+               "#prof{background:#1d2433;border:none;box-shadow:none;color:white;font-size:24px;font-weight:bold;padding:4px 18px;border-radius:22px;}"
+               "#prof:hover,#prof:focus{background:#2a6df4;}"
                "flowboxchild{padding:0;border-radius:18px;}"
                "flowboxchild:focus,flowboxchild:selected{outline:5px solid white;background:transparent;}"
                + self.font_css() + self.bg_css())
@@ -4060,11 +4868,12 @@ class Hub(Gtk.Window):
                 lab.set_markup("\u25a4  %s\n<span size=\"small\">%d item%s</span>" % (GLib.markup_escape_text(a["name"]), n, "" if n == 1 else "s"))
             else:
                 lab.set_text(a["name"])
-            if a.get("picture_only") and a.get("image") and os.path.isfile(a["image"]):
+            pic = card_picture(self.cfg, a)
+            if pic and pic[1]:
                 lab.set_text("")  # picture-only card: the picture stands in for the card
             box = Gtk.EventBox(); box.add(lab); box.set_size_request(tw, th)
             box.get_style_context().add_class("tile"); box.set_name(f"t{i}")
-            css += f"#t{i}{{{self.tile_bg(a, sp[1] if sp else a['color'])}border-radius:18px;}}"
+            css += f"#t{i}{{{self.tile_bg(pic, sp[1] if sp else a['color'])}border-radius:18px;}}"
             child = Gtk.FlowBoxChild(); child.add(box); child.app = a
             child.connect("focus-in-event", self.on_tile_focus)
             fl.add(child)
@@ -4111,6 +4920,9 @@ class Hub(Gtk.Window):
             return self.hide_remote_badge()
         if k in ("u", "U") and self.upd_btn.get_visible():
             return self.update_badge_click()
+        if k in ("p", "P"):
+            self.profile_pick_flow(self)
+            return True
         act = remote_action(self.cfg, k)
         if act in ("select", "playpause"):
             f = self.focus_child()
@@ -4225,7 +5037,7 @@ class Hub(Gtk.Window):
             avail = {n: (b, f) for n, b, f in installed_browsers()}
         binary, fam = avail[name]
         g = self.mon.get_geometry()
-        prof = os.path.join(CFG_DIR, "profiles", "browse-" + "".join(c for c in name if c.isalnum()).lower())
+        prof = browser_profile(self.cfg, "browse-" + "".join(c for c in name if c.isalnum()).lower())
         os.makedirs(prof, exist_ok=True)  # own profile: keeps your logins here and lets the kill hotkey work
         url = self.cfg.get("home_url", "https://duckduckgo.com")
         after = None
@@ -4251,13 +5063,13 @@ class Hub(Gtk.Window):
         return (f'.tile label{{color:white;font-family:"{fd.get_family() or "Sans"}";font-size:{size:.1f}pt;'
                 f'font-weight:{int(fd.get_weight())};font-style:{style};text-shadow:0 2px 6px black;}}')
 
-    def tile_bg(self, a, color):
+    def tile_bg(self, pic, color):
+        """CSS for a card: its color, and its picture (pic = (path, picture-only) from card_picture) if it has one."""
         css = f"background-color:{color};"
-        img = a.get("image")
-        if img and os.path.isfile(img):
-            uri = Gio.File.new_for_path(img).get_uri()
+        if pic and os.path.isfile(pic[0]):
+            uri = Gio.File.new_for_path(pic[0]).get_uri()
             size = "contain" if self.cfg.get("picture_fit") == "fit" else "cover"  # same card size either way
-            if a.get("picture_only"):
+            if pic[1]:
                 css += (f'background-image:url("{uri}");background-size:{size};'
                         'background-repeat:no-repeat;background-position:center;')
             else:  # dark overlay keeps the name readable
@@ -4899,6 +5711,8 @@ class Hub(Gtk.Window):
         fav.set_active(bool(app.get("favorite")))
         pic_only = Gtk.CheckButton(label="Show only the picture (hide the name)")
         pic_only.set_active(bool(app.get("picture_only")))
+        no_pic = Gtk.CheckButton(label="Color only: no picture, not even from an icon pack")
+        no_pic.set_active(bool(app.get("no_picture")))
         pop_cb = Gtk.CheckButton(label="Show this app's pop-ups (reminders, alerts) on top of other apps")
         pop_cb.set_active(bool(app.get("popups")))
         keep_cb = Gtk.CheckButton(label="Keep its server running in the background (needed for pop-ups when it is closed)")
@@ -4911,7 +5725,8 @@ class Hub(Gtk.Window):
                 (Gtk.Label(label="Card color", xalign=1), color), (Gtk.Label(label="Picture", xalign=1), imgbox),
                 (Gtk.Label(label="Favorite", xalign=1), fav), (Gtk.Label(label="Device", xalign=1), dev),
                 (Gtk.Label(label="", xalign=1), pic_only),
-                (Gtk.Label(label="Pop-ups", xalign=1), pop_cb), (Gtk.Label(label="", xalign=1), keep_cb)]
+                (Gtk.Label(label="Pop-ups", xalign=1), pop_cb), (Gtk.Label(label="", xalign=1), keep_cb),
+                (Gtk.Label(label="", xalign=1), no_pic)]
         for r, (l, w) in enumerate(rows):
             grid.attach(l, 0, r, 1, 1); grid.attach(w, 1, r, 1, 1)
         name.set_size_request(380, -1)
@@ -4935,6 +5750,8 @@ class Hub(Gtk.Window):
             t, k, c = target.get_text().strip(), kind.get_active(), color.get_rgba()
             base = {"name": name.get_text().strip(), "favorite": fav.get_active(), "picture_only": pic_only.get_active(),
                     "color": "#%02x%02x%02x" % tuple(round(v * 255) for v in (c.red, c.green, c.blue))}
+            if no_pic.get_active():
+                base["no_picture"] = True
             fix = lambda u: u if u.startswith("http") else "https://" + u
             if pop_cb.get_active() and k in (0, 2):
                 base["popups"] = True
@@ -4970,7 +5787,7 @@ class Hub(Gtk.Window):
             return self.tv_settings()
         dlg = Gtk.Dialog(title="anTV settings", transient_for=self, modal=True)
         hook_back(dlg, self.cfg)
-        HIDE_R, QUIT_R, DONE_R, RESTART_R = 100, 101, 102, 103
+        HIDE_R, QUIT_R, DONE_R, RESTART_R, PROFILE_R = 100, 101, 102, 103, 104
         dlg.add_buttons("Quit anTV", QUIT_R, "Hide anTV", HIDE_R, "Cancel", Gtk.ResponseType.CANCEL, "Save", Gtk.ResponseType.OK)
         dlg.set_default_size(1100, 760)  # 25% wider than before
 
@@ -5232,6 +6049,105 @@ class Hub(Gtk.Window):
         pu_info = Gtk.Button(label="Show the push address and key\u2026")
         pu_info.connect("clicked", lambda _b: self.show_push_info(dlg))
 
+        # ---- Pictures tab
+        pq = Gtk.ComboBoxText()
+        for t in PIC_LEVEL_NAMES:
+            pq.append_text(t)
+        pq.set_active(PIC_LEVELS.index(self.cfg.get("pic_level", "high")) if self.cfg.get("pic_level", "high") in PIC_LEVELS else 1)
+        pkeep = Gtk.CheckButton(label="Keep the original pictures (so the quality can be raised later)")
+        pkeep.set_active(self.cfg.get("pic_keep", True))
+        pcol = Gtk.CheckButton(label="Cards: colors only (hide every picture)")
+        pcol.set_active(bool(self.cfg.get("colors_only")))
+        pack_cb = Gtk.ComboBoxText()
+
+        def fill_packs(select=None):
+            pack_cb.remove_all(); pack_cb.append_text("None (no icon pack)")
+            names = list_iconpacks()
+            for nm in names:
+                pack_cb.append_text(nm)
+            want = select or self.cfg.get("icon_pack")
+            pack_cb.set_active(names.index(want) + 1 if want in names else 0)
+        fill_packs()
+        pover = Gtk.CheckButton(label="Icon pack replaces my own pictures")
+        pover.set_active(bool(self.cfg.get("icon_pack_override")))
+        ponly = Gtk.CheckButton(label="Icon pack: show only the picture (hide card names)")
+        ponly.set_active(bool(self.cfg.get("icon_pack_picture_only")))
+
+        def at_chosen_level(fn):  # imports and re-optimizing use the quality chosen here, even before Save
+            old = {k: self.cfg.get(k) for k in ("pic_level", "pic_keep")}
+            self.cfg["pic_level"] = PIC_LEVELS[max(0, pq.get_active())]; self.cfg["pic_keep"] = pkeep.get_active()
+            try:
+                return fn()
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        self.cfg.pop(k, None)
+                    else:
+                        self.cfg[k] = v
+
+        def do_import(folder):
+            p = (choose_path(dlg, self.cfg, "Choose an icon pack folder", folder=True) if folder
+                 else choose_path(dlg, self.cfg, "Choose an icon pack (.zip)", pattern="*.zip"))
+            if not p:
+                return
+            r = at_chosen_level(lambda: run_busy(dlg, self.cfg, "Importing the icon pack\u2026", lambda: import_iconpack(p)))
+            if "e" in r:
+                self.data_box(dlg, "Couldn't import that icon pack:\n%s" % r["e"], Gtk.MessageType.ERROR)
+            else:
+                fill_packs(r["v"][0])
+                self.data_box(dlg, "Icon pack \"%s\" imported: %d pictures. It is selected; press Save to use it." % r["v"])
+
+        def do_remove():
+            nm = pack_cb.get_active_text()
+            if pack_cb.get_active() > 0 and choose_dialog(dlg, self.cfg, "Remove the icon pack \"%s\"?" % nm,
+                                                          ["No, keep it", "Yes, remove it"]) == 1:
+                delete_iconpack(nm)
+                if self.cfg.get("icon_pack") == nm:
+                    self.cfg.pop("icon_pack", None)
+                fill_packs("")
+
+        def do_reopt():
+            r = at_chosen_level(lambda: run_busy(dlg, self.cfg, "Optimizing pictures\u2026", reoptimize_all))
+            self.data_box(dlg, ("Optimized %d pictures." % r["v"]) if "v" in r else "Couldn't optimize: %s" % r.get("e"))
+        pimp = Gtk.Button(label="Import an icon pack (.zip)\u2026"); pimp.connect("clicked", lambda _b: do_import(False))
+        pimpf = Gtk.Button(label="Import an icon pack folder\u2026"); pimpf.connect("clicked", lambda _b: do_import(True))
+        prem = Gtk.Button(label="Remove the selected icon pack\u2026"); prem.connect("clicked", lambda _b: do_remove())
+        popen = Gtk.Button(label="Open the icon packs folder")
+        popen.connect("clicked", lambda _b: (os.makedirs(ICON_DIR, exist_ok=True), open_path(ICON_DIR)))
+        phelp = Gtk.Button(label="How to name pictures in an icon pack\u2026"); phelp.connect("clicked", lambda _b: show_iconpack_help(dlg, self.cfg))
+        preopt = Gtk.Button(label="Re-optimize my pictures now"); preopt.connect("clicked", lambda _b: do_reopt())
+        bp = dict(self.cfg.get("builtin_images") or {})  # card key -> picture path, "" = color only
+        bonly = set(self.cfg.get("builtin_picture_only") or [])
+        bgrid = Gtk.Grid(column_spacing=14, row_spacing=10)
+        for r_, (key, label) in enumerate(BUILTIN_CARDS):
+            fcb = Gtk.FileChooserButton(title="Choose a picture for " + label, action=Gtk.FileChooserAction.OPEN)
+            flt2 = Gtk.FileFilter(); flt2.set_name("Images"); flt2.add_pixbuf_formats(); fcb.add_filter(flt2)
+            if bp.get(key) and os.path.isfile(bp[key]):
+                fcb.set_filename(bp[key])
+            co = Gtk.CheckButton(label="Color only"); co.set_active(bp.get(key) == "")
+            po = Gtk.CheckButton(label="Hide name"); po.set_active(key in bonly)
+            nobtn = Gtk.Button(label="None")
+
+            def on_file(b, key=key, co=co):
+                bp[key] = b.get_filename(); co.set_active(False)
+
+            def on_none(_b, key=key, fcb=fcb, co=co):
+                bp[key] = None; fcb.unselect_all(); co.set_active(False)
+
+            def on_co(b, key=key):
+                if b.get_active():
+                    bp[key] = ""
+                elif bp.get(key) == "":
+                    bp[key] = None
+
+            def on_po(b, key=key):
+                (bonly.add if b.get_active() else bonly.discard)(key)
+            fcb.connect("file-set", on_file); nobtn.connect("clicked", on_none); co.connect("toggled", on_co); po.connect("toggled", on_po)
+            for col, w in enumerate((Gtk.Label(label=label, xalign=0), fcb, nobtn, co, po)):
+                bgrid.attach(w, col, r_, 1, 1)
+        pic_note = Gtk.Label(label="Cards you add have their own picture box in the app form. Here: every other card, icon packs, and speed.\n"
+                                   "Picture order: color only > the card's own picture > the icon pack > plain color.", xalign=0)
+
         # ---- About tab
         tv_cb = Gtk.CheckButton(label="Use the TV-friendly (10-foot) settings screen: huge text, remote and gamepad friendly")
         tv_cb.set_active(self.cfg.get("tenft_settings", False))
@@ -5239,7 +6155,8 @@ class Hub(Gtk.Window):
         ver.pack_start(Gtk.Label(label="anTV version " + VERSION, xalign=0), False, False, 0)
         hb = Gtk.Button(label="Version history\u2026"); hb.connect("clicked", lambda _b: show_history(dlg, self.cfg))
         scb = Gtk.Button(label="Keyboard shortcuts\u2026"); scb.connect("clicked", lambda _b: show_shortcuts(dlg, self.cfg))
-        ver.pack_start(hb, False, False, 0); ver.pack_start(scb, False, False, 0)
+        lic = Gtk.Button(label="License and notices\u2026"); lic.connect("clicked", lambda _b: show_license(dlg, self.cfg))
+        ver.pack_start(hb, False, False, 0); ver.pack_start(scb, False, False, 0); ver.pack_start(lic, False, False, 0)
 
         def form(rows):
             """Label on the left, control on the right; rows with no label (checkboxes, buttons) use the full width."""
@@ -5267,11 +6184,29 @@ class Hub(Gtk.Window):
                           ("Change picture every (seconds, 0 = never)", sp_int), (None, shuf),
                           ("Fade cards after idle (seconds, 0 = never)", sp_delay),
                           ("Time to fade out (seconds)", sp_fade), ("Faintest card opacity (%)", sp_min)]))
+        tab("Pictures", form([(None, pic_note), ("Picture quality", pq), (None, pkeep), (None, preopt), (None, pcol),
+                              ("Icon pack in use", pack_cb), (None, pimp), (None, pimpf), (None, prem), (None, popen), (None, phelp),
+                              (None, pover), (None, ponly), ("Built-in cards", bgrid)]))
         tab("System", form([("Show anTV on", mon), ("Web browser", br), ("Local media folders (separate with ;)", media),
                             ("Android display (Waydroid)", disp_mode), (None, ab), (None, pb), (None, rb), (None, gb)]))
         tab("Pop-ups", form([(None, pu_on), ("Where pop-ups appear", pu_pos), ("Keep a pop-up up for (seconds, 0 = until dismissed)", pu_secs),
                              (None, pu_snd), (None, pu_src_lab), (None, pu_add), (None, pu_clr), (None, pu_test),
                              (None, pu_push), (None, pu_lan), (None, pu_info)]))
+        pr_ask = Gtk.CheckButton(label="Ask who's watching when anTV starts")
+        pr_ask.set_active(bool(self.cfg.get("profile_ask")))
+        pr_note = Gtk.Label(label="Each profile has its own apps, layout, look, background and website logins.\n"
+                                  "Switching closes this window without saving changes you have not saved yet.", xalign=0)
+        pr_now = Gtk.Label(label="Profile in use: " + profile_name(self.cfg), xalign=0)
+        pr_sw = Gtk.Button(label="Switch profile\u2026")
+        pr_sw.connect("clicked", lambda _b: self.profile_pick_flow(dlg) and dlg.response(PROFILE_R))
+        pr_add = Gtk.Button(label="Add a profile\u2026")
+        pr_add.connect("clicked", lambda _b: self.profile_add_flow(dlg) and dlg.response(PROFILE_R))
+        pr_ren = Gtk.Button(label="Rename a profile\u2026")
+        pr_ren.connect("clicked", lambda _b: (self.profile_rename_flow(dlg), pr_now.set_text("Profile in use: " + profile_name(self.cfg))))
+        pr_del = Gtk.Button(label="Delete a profile\u2026")
+        pr_del.connect("clicked", lambda _b: self.profile_delete_flow(dlg) and dlg.response(PROFILE_R))
+        tab("Profiles", form([(None, pr_note), (None, pr_now), (None, pr_ask), (None, pr_sw), (None, pr_add),
+                              (None, pr_ren), (None, pr_del)]))
         up_mode = Gtk.ComboBoxText()
         for t in ("Never check", "Check and tell me", "Install automatically (used the next time anTV starts)"):
             up_mode.append_text(t)
@@ -5312,12 +6247,24 @@ class Hub(Gtk.Window):
             return
         if resp in (Gtk.ResponseType.OK, HIDE_R, RESTART_R):
             self.cfg["apps"] = apps
+            self.cfg["pic_level"] = PIC_LEVELS[max(0, pq.get_active())]
+            self.cfg["pic_keep"] = pkeep.get_active()
+            self.cfg["colors_only"] = pcol.get_active()
+            if pack_cb.get_active() > 0:
+                self.cfg["icon_pack"] = pack_cb.get_active_text()
+            else:
+                self.cfg.pop("icon_pack", None)
+            self.cfg["icon_pack_override"] = pover.get_active()
+            self.cfg["icon_pack_picture_only"] = ponly.get_active()
+            self.cfg["builtin_picture_only"] = sorted(bonly)
+            self.cfg["builtin_images"] = {k: ("" if v == "" else store_image(v)) for k, v in bp.items()
+                                          if v == "" or (v and os.path.isfile(v))}
             self.cfg["background_default"] = def_cb.get_active()
             self.cfg["idle_delay"] = int(sp_delay.get_value())
             self.cfg["idle_fade"] = int(sp_fade.get_value())
             self.cfg["idle_min"] = int(sp_min.get_value())
             if bgs["img"] and os.path.isfile(bgs["img"]):
-                self.cfg["background"] = store_image(bgs["img"])
+                self.cfg["background"] = store_image(bgs["img"], "bg")
             else:
                 self.cfg.pop("background", None)
             if bgd["dir"] and os.path.isdir(bgd["dir"]):
@@ -5348,6 +6295,7 @@ class Hub(Gtk.Window):
             self.cfg["popup_sources"] = pu_src["list"]
             self.cfg["popup_push"] = pu_push.get_active()
             self.cfg["popup_lan"] = pu_lan.get_active()
+            self.cfg["profile_ask"] = pr_ask.get_active()
             self.cfg["update_mode"] = UPDATE_MODES[max(0, up_mode.get_active())]
             self.cfg["update_repo"] = up_repo.get_text().strip()
             save(self.cfg)
@@ -5371,7 +6319,7 @@ class Hub(Gtk.Window):
         browser, chromium = find_browser()
         if not browser:
             raise RuntimeError("No browser found (install Edge, Chrome or Firefox)")
-        prof = os.path.join(CFG_DIR, "profiles", "".join(c for c in a["name"] if c.isalnum()).lower())
+        prof = browser_profile(self.cfg, "".join(c for c in a["name"] if c.isalnum()).lower())
         os.makedirs(prof, exist_ok=True)
         g = self.mon.get_geometry()
         if chromium:  # separate profile per service keeps each login saved
